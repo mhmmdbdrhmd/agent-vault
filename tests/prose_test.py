@@ -143,6 +143,14 @@ for label, cmd in QUOTED_OPS:
     got, why = ask(cmd)
     R.check("still blocked: %s" % label, got == "DENY", why.split("\n")[0])
 
+
+# A tilde is only "home" at the start of a path. Joining before expanding used
+# to produce /home/you/~/... — a path that cannot exist, reported as fact.
+got, why = ask("cat ~/.ssh/id_" + "ed25519")
+R.check("tilde expanded before resolving", "/~/" not in why, why.split("\n")[0])
+R.check("tilde path resolves to the real home", HOME + "/.ssh/id_" in why,
+        why.split("\n")[0])
+
 import shutil                                            # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)
 sys.exit(R.done())

@@ -390,8 +390,13 @@ def _looks_like_path(t):
 
 
 def _resolve(t, base):
+    # Expand first: a tilde only means "home" at the start of a path. Joining
+    # before expanding buries it mid-path, where it means nothing — the denial
+    # then reports a path that cannot exist, and the existence check runs
+    # against that nonsense instead of the real file.
+    t = os.path.expanduser(os.path.expandvars(t))
     cand = t if os.path.isabs(t) else os.path.join(base, t)
-    return os.path.normpath(os.path.expanduser(os.path.expandvars(cand)))
+    return os.path.normpath(cand)
 
 
 def _cred_match(t, base):
@@ -493,8 +498,7 @@ def check_bash(cmd):
                 # a commit message, an echo, a --description. Prose, not an
                 # operation. Unquoted tokens are still matched unconditionally.
                 continue
-            full = t if os.path.isabs(t) else os.path.join(base, t)
-            full = os.path.normpath(os.path.expanduser(full))
+            full = _resolve(t, base)
             for vp in VAULT_PATHS:
                 if under(full, vp):
                     return ("BLOCKED: %s is vault internals.\n\n%s"
@@ -515,8 +519,7 @@ def check_bash(cmd):
             for t in _tokens(seg):
                 if "$" in t:
                     continue
-                q = os.path.normpath(os.path.expanduser(
-                    t if os.path.isabs(t) else os.path.join(base, t)))
+                q = _resolve(t, base)
                 if (under(q, os.path.join(HOME, ".ssh"))
                         or under(q, os.path.join(HOME, ".aws"))
                         or under(q, os.path.join(HOME, ".cert"))):
