@@ -1,0 +1,1378 @@
+#!/usr/bin/env python3
+"""vlt — centralized credential vault.
+
+Agents may DISCOVER (list/peek) and MOVE (exec/file/render) secrets.
+Agents may never SEE a secret value, and may never hunt for credentials elsewhere.
+If a secret is missing, `vlt request` opens a separate window for the human.
+"""
+
+import argparse
+import getpass
+import re
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+os.umask(0o077)
+
+# Code lives next to this program; VLT_HOME holds data and may point anywhere.
+_HERE = os.path.dirname(os.path.realpath(__file__))
+for _cand in (_HERE,
+              os.path.expanduser("~/.local/share/vlt"),
+              os.environ.get("VLT_HOME", "")):
+    if _cand and os.path.exists(os.path.join(_cand, "vltlib.py")):
+        sys.path.insert(0, _cand)
+        break
+else:
+    sys.stderr.write(
+        "vlt: cannot find vltlib.py next to %s, in ~/.local/share/vlt, "
+        "or in VLT_HOME.\n     Reinstall with ./install.sh\n" % _HERE)
+    raise SystemExit(3)
+
+import vltlib as V  # noqa: E402
+
+
+def die(msg, code=2):
+    sys.stderr.write("vlt: %s\n" % msg)
+    sys.exit(code)
+
+
+def agent_block(cmd):
+    """Refuse value-revealing commands to agents, even without the hook."""
+    if V.is_agent() and cmd in V.policy()["agent_denied_commands"]:
+        V.audit("denied-agent", "-", "command %s" % cmd, ok=False)
+        die(("`vlt %s` reveals secret values and is not available to agents.\n" % cmd) +
+            "     Use instead:  vlt list | vlt peek <name> | vlt exec <name> -- CMD\n"
+            "                   vlt file <name> <field> --out PATH\n"
+            "                   vlt render --secret <name> --out FILE\n"
+            "     If the secret does not exist yet:  vlt request <name> --fields ...",
+            13)
+
+
+
+NEEDS_CONFIRM = {"get", "show", "export", "identity", "hide", "unhide",
+                 "set", "import", "rm", "rename", "ui", "keyring"}
+
+
+def confirm_human(cmd, detail=""):
+    """Prove a person is present. An env var alone is not proof.
+
+    A controlling terminal means someone typed this. Otherwise ask on the
+    desktop, which an agent can trigger but cannot answer.
+    """
+    if os.environ.get("VLT_TEST_CONFIRM") == "1":
+        return
+    try:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return
+    except Exception:
+        pass
+
+    if shutil.which("zenity") and os.environ.get("DISPLAY"):
+        msg = ("A process is asking to run:\n\n    vlt %s %s\n\n"
+               "This can expose credential values.\n"
+               "Allow it only if you started it yourself." % (cmd, detail))
+        r = subprocess.run(
+            ["zenity", "--question", "--title", "vlt — confirm",
+             "--text", msg, "--ok-label", "Allow", "--cancel-label", "Deny",
+             "--default-cancel"],
+            capture_output=True)
+        if r.returncode == 0:
+            V.audit("confirm", detail or "-", "approved at the desktop for %s" % cmd)
+            return
+        V.audit("confirm", detail or "-", "denied at the desktop for %s" % cmd,
+                ok=False)
+        die("denied at the confirmation dialog.", 17)
+
+    die("`vlt %s` needs a real terminal or a desktop confirmation.\n"
+        "     VLT_HUMAN=1 on its own is not proof that a person is present —\n"
+        "     a script could set it. Run this from your own terminal." % cmd, 17)
+
+
+# ------------------------------------------------------------------ out-of-band UI
+
+def _term_prompt(spec):
+    """Collect fields from the human in a SEPARATE terminal window."""
+    payload = tempfile.NamedTemporaryFile(
+        "w", suffix=".json", delete=False, dir=V.ROOT)
+    json.dump(spec, payload)
+    payload.close()
+    os.chmod(payload.name, 0o600)
+    helper = [sys.executable, os.path.abspath(__file__), "_prompt", payload.name]
+
+    launched = False
+    if shutil.which("gnome-terminal") and os.environ.get("DISPLAY"):
+        try:
+            subprocess.run(
+                ["gnome-terminal", "--wait", "--title",
+                 "vlt — enter credentials", "--"] + helper,
+                check=False, timeout=900)
+            launched = True
+        except Exception:
+            launched = False
+    if not launched and shutil.which("xterm") and os.environ.get("DISPLAY"):
+        try:
+            subprocess.run(["xterm", "-T", "vlt — enter credentials", "-e"]
+                           + helper, check=False, timeout=900)
+            launched = True
+        except Exception:
+            launched = False
+    if not launched:
+        if V.is_agent():
+            os.unlink(payload.name)
+            die("cannot open a separate window for credential entry.\n"
+                "     Ask the user to run, in their own terminal:\n"
+                "       VLT_HUMAN=1 vlt add %s" % spec["name"], 14)
+        subprocess.run(helper, check=False)
+
+    try:
+        with open(payload.name) as fh:
+            result = json.load(fh)
+    except Exception:
+        result = {}
+    finally:
+        try:
+            os.unlink(payload.name)
+        except OSError:
+            pass
+    return result.get("_saved") and result or None
+
+
+def cmd__prompt(args):
+    """Runs INSIDE the separate terminal window. Never called by an agent."""
+    with open(args.payload) as fh:
+        spec = json.load(fh)
+    name = spec["name"]
+
+    # The form lets the person retarget the branch and set masking per field.
+    if os.environ.get("VLT_PLAIN_PROMPT") != "1":
+        try:
+            import vltui
+            rec = vltui.request_form(spec)
+            if rec is None:
+                print("\n  cancelled — nothing saved.")
+                time.sleep(1.2)
+                return 1
+            V.save(rec)
+            V.audit("add", rec["name"], "via request form")
+            with open(args.payload, "w") as fh:
+                json.dump({"_saved": True, "name": rec["name"]}, fh)
+            print("saved and encrypted: %s" % rec["name"])
+            time.sleep(1.2)
+            return 0
+        except Exception as exc:
+            print("  (form unavailable: %s — falling back to prompts)" % exc)
+            time.sleep(1.5)
+
+    print("=" * 68)
+    print("  vlt — credential entry")
+    print("=" * 68)
+    print("  secret : %s" % name)
+    print("  type   : %s" % spec.get("type", "token"))
+    if spec.get("reason"):
+        print("  reason : %s" % spec["reason"])
+    print("  Values are typed here and encrypted directly into the vault.")
+    print("  They are NOT shown to the agent and NOT written to the chat.")
+    print("  Leave a field empty to skip it. Ctrl-C aborts.")
+    print("-" * 68)
+
+    try:
+        rec = V.load(name) if V.exists(name) else V.blank_record(
+            name, spec.get("type", "token"))
+    except Exception:
+        rec = V.blank_record(name, spec.get("type", "token"))
+
+    try:
+        for f in spec.get("fields", []):
+            if f in V.SECRET_FIELDS:
+                val = getpass.getpass("  %-12s (hidden): " % f)
+            else:
+                val = input("  %-12s        : " % f)
+            if val:
+                if f in V.FIELDS:
+                    rec["fields"][f] = val
+                else:
+                    rec["extra"][f] = val
+        print("-" * 68)
+        print("  The next two are optional labels, not credentials.")
+        print("  Press Enter to skip either one.")
+        print("    account : which identity this belongs to, when one provider")
+        print("              has several logins (an email, a client name, 'work').")
+        print("              Leave empty if the record name already says it.")
+        print("    notes   : anything you want to read later. Never a secret;")
+        print("              notes are shown in full by `vlt peek`.")
+        acct = input("  %-12s (opt) : " % "account")
+        if acct:
+            rec["account"] = acct
+        note = input("  %-12s (opt) : " % "notes")
+        if note:
+            rec["notes"] = note
+    except (KeyboardInterrupt, EOFError):
+        print("\n  aborted — nothing saved.")
+        time.sleep(1.5)
+        return 1
+
+    # default env_map so `vlt exec` works for this record immediately
+    if not rec["env_map"]:
+        prov = name.split("/")[0].split(".")[0].upper().replace("-", "_")
+        for f in ("token", "key", "secret", "password", "username", "host", "port"):
+            if rec["fields"].get(f):
+                rec["env_map"]["%s_%s" % (prov, f.upper())] = f
+    rec["rotated"] = V._now()
+    V.save(rec)
+    V.audit("add", name, "via separate-window prompt")
+    with open(args.payload, "w") as fh:
+        json.dump({"_saved": True, "name": name}, fh)
+    print("-" * 68)
+    print("  saved and encrypted: %s" % name)
+    print("  this window closes in 3s")
+    time.sleep(3)
+    return 0
+
+
+def register_rendered(path):
+    """Record a file that now holds live credential values, so the guard hook
+    can refuse to let an agent read it back."""
+    reg = os.path.join(V.ROOT, "rendered.json")
+    try:
+        with open(reg) as fh:
+            paths = set(json.load(fh))
+    except Exception:
+        paths = set()
+    paths.add(os.path.abspath(path))
+    paths = {q for q in paths if os.path.exists(q)}
+    fd = os.open(reg + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(sorted(paths), fh, indent=1)
+    os.replace(reg + ".tmp", reg)
+
+
+# ------------------------------------------------------------------- agent-safe
+
+def cmd_list(args):
+    idx = V.read_index()
+    if not idx:
+        idx = V.reindex_all()
+    import fnmatch
+    names = sorted(idx)
+    if args.glob:
+        names = [n for n in names
+                 if fnmatch.fnmatch(n, args.glob) or args.glob.lower() in n.lower()
+                 or args.glob.lower() in " ".join(idx[n].get("tags", [])).lower()]
+    if args.json:
+        print(json.dumps({n: idx[n] for n in names}, indent=2))
+        return 0
+    if not names:
+        print("no secrets match. To create one:")
+        print("  vlt request <provider>/<account> --fields username,password")
+        return 0
+    print("%-34s %-9s %-28s %s" % ("NAME", "TYPE", "FIELDS", "TAGS"))
+    for n in names:
+        e = idx[n]
+        print("%-34s %-9s %-28s %s" % (
+            n, e.get("type", "?"), ",".join(e.get("fields", [])),
+            ",".join(e.get("tags", []))))
+    V.audit("list", args.glob or "*")
+    return 0
+
+
+def cmd_peek(args):
+    V.check_access(args.name)
+    rec = V.load(args.name)
+    V.audit("peek", args.name)
+    print("name     : %s" % rec["name"])
+    print("type     : %s" % rec["type"])
+    print("account  : %s" % rec.get("account", ""))
+    print("tags     : %s" % ",".join(rec.get("tags", [])))
+    print("env_map  : %s" % json.dumps(rec.get("env_map", {})))
+    if rec.get("notes"):
+        print("notes    : %s" % rec["notes"])
+    hid = V.hidden_fields(rec)
+    print("hidden   : %s" % (", ".join(sorted(hid)) or "(nothing)"))
+    print("-" * 60)
+    for f in V.FIELDS:
+        v = rec["fields"].get(f)
+        if v in (None, ""):
+            continue
+        print("%-12s %s" % (f + ":", V.preview(f, v, args.chars, f in hid)))
+    for k, v in rec.get("extra", {}).items():
+        print("%-12s %s" % (k + ":", V.preview(k, v, args.chars, k in hid)))
+    print("-" * 60)
+    print("structure only. To use it:  vlt exec %s -- <command>" % rec["name"])
+    return 0
+
+
+def _env_for(names):
+    env = dict(os.environ)
+    used = []
+    for name in names:
+        V.check_access(name)
+        rec = V.load(name)
+        emap = rec.get("env_map") or {}
+        if not emap:
+            prov = name.split("/")[0].split(".")[0].upper().replace("-", "_")
+            emap = {"%s_%s" % (prov, f.upper()): f
+                    for f, v in rec["fields"].items() if v}
+        for var, field in emap.items():
+            val = rec["fields"].get(field)
+            if val is None:
+                val = rec.get("extra", {}).get(field)
+            if val is not None:
+                env[var] = str(val)
+                used.append(var)
+        V.audit("exec-inject", name, "vars=%s" % ",".join(sorted(emap)))
+    return env, used
+
+
+# Commands whose whole job is to print the environment.
+ENV_DUMPERS = {
+    "env", "printenv", "set", "export", "declare", "typeset", "compgen",
+    "getenv", "environ",
+}
+
+
+def _reject_env_dump(cmd, used, allow_interp=False):
+    """Refuse a child command that would echo the injected secrets."""
+    base = os.path.basename(cmd[0])
+    if base in ENV_DUMPERS:
+        die("`%s` prints the environment, which is where the secret was just "
+            "injected. That would put the value straight into your output.\n"
+            "     Run the program that consumes the credential instead." % base, 16)
+
+    joined = " ".join(cmd)
+    if re.search(r"/proc/(?:self|[0-9]+)/environ", joined):
+        die("that command reads the process environment directly, which would "
+            "expose the injected secret.", 16)
+
+    if allow_interp:
+        return
+    for var in used:
+        if re.search(r"\$\{?%s\b" % re.escape(var), joined):
+            die("the command references $%s, the variable the secret was "
+                "injected into. Pass it to a program that reads the environment "
+                "itself; do not interpolate it into a command line, where it "
+                "would appear in output, logs and shell history.\n"
+                "     If a program genuinely needs it as an argument, a human can "
+                "re-run with --allow-interpolation." % var, 16)
+
+    for tok in cmd[1:]:
+        if os.path.basename(tok) in ENV_DUMPERS:
+            die("`%s` appears in the command and prints the environment, which "
+                "would expose the injected secret." % os.path.basename(tok), 16)
+
+    # A dumper in command position inside a shell string: sh -c 'env | grep X'.
+    # Each argument is treated as its own script, so a dumper at the start of an
+    # argument counts as command position.
+    dumper_re = re.compile(
+        r"(?:^|[|;&(]|\$\(|`)\s*(%s)\b" % "|".join(sorted(ENV_DUMPERS)))
+    for tok in cmd:
+        m = dumper_re.search(tok)
+        if m:
+            die("`%s` appears in command position inside the arguments and "
+                "would print the environment the secret was injected into."
+                % m.group(1), 16)
+
+
+def cmd_exec(args):
+    cmd = list(args.cmd)
+    while cmd and cmd[0] == "--":
+        cmd.pop(0)
+    args.cmd = cmd
+    if not cmd:
+        die("nothing to run: vlt exec <name> -- <command...>")
+    names = [n for n in args.name.split(",") if n]
+    env, used = _env_for(names)
+    allow_interp = getattr(args, "allow_interpolation", False)
+    # REMAINDER captures the flag if it came after the name; honour it anyway.
+    if "--allow-interpolation" in cmd:
+        cmd = [c for c in cmd if c != "--allow-interpolation"]
+        while cmd and cmd[0] == "--":
+            cmd.pop(0)
+        args.cmd = cmd
+        allow_interp = True
+    if allow_interp and V.is_agent():
+        die("--allow-interpolation puts the secret on a command line, where it "
+            "lands in output and history. It is available to humans only.", 13)
+    _reject_env_dump(cmd, used, allow_interp)
+    sys.stderr.write("vlt: injected %s into the child process\n" % ", ".join(used))
+    try:
+        return subprocess.call(args.cmd, env=env)
+    except FileNotFoundError:
+        die("command not found: %s" % args.cmd[0])
+
+
+def cmd_file(args):
+    V.check_access(args.name)
+    rec = V.load(args.name)
+    val = rec["fields"].get(args.field)
+    if val is None:
+        val = rec.get("extra", {}).get(args.field)
+    if val is None:
+        die("field %r is empty in %s (have: %s)"
+            % (args.field, args.name,
+               ",".join(f for f, v in rec["fields"].items() if v)))
+    out = os.path.abspath(os.path.expanduser(args.out))
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    mode = int(args.mode, 8)
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(str(val))
+        if args.newline:
+            fh.write("\n")
+    os.chmod(out, mode)
+    register_rendered(out)
+    V.audit("file", args.name, "field=%s -> %s" % (args.field, out))
+    sys.stderr.write("vlt: wrote %s field of %s -> %s (mode %s)\n"
+                     % (args.field, args.name, out, args.mode))
+    return 0
+
+
+def cmd_render(args):
+    names = [n for spec in args.secret for n in spec.split(",")]
+    values = {}
+    for name in names:
+        V.check_access(name)
+        rec = V.load(name)
+        for var, field in (rec.get("env_map") or {}).items():
+            v = rec["fields"].get(field)
+            if v is None:
+                v = rec.get("extra", {}).get(field)
+            if v is not None:
+                values[var] = str(v)
+        for f, v in rec["fields"].items():
+            if v is not None:
+                values["%s.%s" % (name, f)] = str(v)
+        V.audit("render", name, "-> %s" % args.out)
+
+    if args.template:
+        tpl_path = args.template
+        if not os.path.exists(tpl_path):
+            alt = os.path.join(V.TEMPLATES, args.template)
+            tpl_path = alt if os.path.exists(alt) else tpl_path
+        if not os.path.exists(tpl_path):
+            die("no such template: %s" % args.template)
+        with open(tpl_path) as fh:
+            body = fh.read()
+        for k, v in values.items():
+            body = body.replace("{{%s}}" % k, v).replace("${%s}" % k, v)
+        missing = [t for t in ("{{", "}}") if t in body]
+        if missing and not args.allow_unresolved:
+            die("template still has unresolved placeholders; "
+                "run `vlt peek` to check field names, or pass --allow-unresolved")
+    else:
+        body = "".join("%s=%s\n" % (k, v) for k, v in sorted(values.items())
+                       if "." not in k)
+
+    out = os.path.abspath(os.path.expanduser(args.out))
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    mode = int(args.mode, 8)
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    os.chmod(out, mode)
+    register_rendered(out)
+    sys.stderr.write("vlt: rendered %d value(s) -> %s (mode %s). "
+                     "Do not cat this file.\n" % (len(values), out, args.mode))
+    return 0
+
+
+def cmd_request(args):
+    name = args.name
+    if V.exists(name) and not args.force:
+        sys.stderr.write("vlt: %s already exists — use it, do not re-request.\n"
+                         % name)
+        return cmd_peek(argparse.Namespace(name=name, chars=4))
+    fields = _normalise_fields(
+        [f.strip() for f in args.fields.split(",") if f.strip()])
+    if shutil.which("notify-send"):
+        subprocess.run(["notify-send", "-u", "critical", "vlt: credential needed",
+                        "%s — a window has opened for you to enter it" % name],
+                       check=False)
+    sys.stderr.write("vlt: opening a separate window for the user to enter %s ...\n"
+                     % name)
+    V.audit("request", name, "fields=%s reason=%s" % (",".join(fields), args.reason))
+    got = _term_prompt({"name": name, "type": args.type,
+                        "fields": fields, "reason": args.reason})
+    if not got:
+        die("the user did not provide %s. Stop and ask them in chat to run:\n"
+            "       VLT_HUMAN=1 vlt add %s" % (name, name), 15)
+    print("stored: %s" % name)
+    return cmd_peek(argparse.Namespace(name=name, chars=4))
+
+
+def cmd_audit(args):
+    if not os.path.exists(V.AUDIT):
+        print("no audit log yet")
+        return 0
+    with open(V.AUDIT) as fh:
+        lines = fh.readlines()
+    for ln in lines[-args.tail:]:
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if args.name and e.get("secret") != args.name:
+            continue
+        sess = (e.get("session") or "-")[:8]
+        if args.session and not (e.get("session") or "").startswith(args.session):
+            continue
+        print("%s  %-8s %-6s %-14s %-28s %s%s" % (
+            e["ts"], sess, e["who"], e["action"], e["secret"],
+            "" if e.get("ok", True) else "DENIED ", e.get("detail", "")))
+    return 0
+
+
+# ---------------------------------------------------------------------- human-only
+
+def cmd_get(args):
+    V.check_access(args.name)
+    rec = V.load(args.name)
+    V.audit("get", args.name, "field=%s" % args.field)
+    val = rec["fields"].get(args.field)
+    if val is None:
+        val = rec.get("extra", {}).get(args.field)
+    if val is None:
+        die("no field %r in %s" % (args.field, args.name))
+    sys.stdout.write(str(val) + ("\n" if sys.stdout.isatty() else ""))
+    return 0
+
+
+def cmd_show(args):
+    V.check_access(args.name)
+    rec = V.load(args.name)
+    V.audit("show", args.name)
+    print(json.dumps(rec, indent=2))
+    return 0
+
+
+def _normalise_fields(raw):
+    """Map requested field names onto the schema, telling the user what moved."""
+    out, moved = [], []
+    for f in raw:
+        c, changed = canonical_field(f)
+        if changed:
+            moved.append((f, c))
+        if c not in out:
+            out.append(c)
+    if moved:
+        sys.stderr.write(
+            "vlt: using the schema's names for %s\n"
+            % ", ".join("%s -> %s" % (a, b) for a, b in moved))
+    unknown = [f for f in out if f not in V.FIELDS]
+    if unknown:
+        sys.stderr.write(
+            "vlt: %s are not schema fields; they will be stored in `extra`.\n"
+            "vlt: they are masked by default, but `vlt exec` will not map them\n"
+            "vlt: to environment variables. Schema fields: %s\n"
+            % (", ".join(unknown), ", ".join(V.FIELDS)))
+    return out
+
+
+def cmd_add(args):
+    fields = _normalise_fields(
+        [f.strip() for f in (args.fields or "").split(",") if f.strip()])
+    if not fields:
+        fields = {"login": ["username", "password"],
+                  "token": ["token"], "apikey": ["key"],
+                  "ssh": ["host", "port", "username", "password", "key"],
+                  "database": ["host", "port", "username", "password", "path"],
+                  "smtp": ["host", "port", "username", "password"],
+                  }.get(args.type, ["username", "password", "token"])
+    got = _term_prompt({"name": args.name, "type": args.type,
+                        "fields": fields, "reason": "manual add"})
+    return 0 if got else 1
+
+
+def cmd_rm(args):
+    if not V.exists(args.name):
+        die("no such secret: %s" % args.name)
+    if not args.yes:
+        ans = input("delete %s permanently? [y/N] " % args.name)
+        if ans.lower() != "y":
+            return 1
+    V.delete(args.name)
+    V.audit("rm", args.name)
+    print("deleted %s" % args.name)
+    return 0
+
+
+def cmd_set(args):
+    """Non-interactive field set — human only, for migration."""
+    rec = V.load(args.name) if V.exists(args.name) else V.blank_record(
+        args.name, args.type)
+    val = args.value
+    if val == "-":
+        val = sys.stdin.read().rstrip("\n")
+    if args.field in V.FIELDS:
+        rec["fields"][args.field] = val
+    else:
+        rec["extra"][args.field] = val
+    if args.env:
+        rec["env_map"][args.env] = args.field
+    if args.tag:
+        for t in args.tag.split(","):
+            if t and t not in rec["tags"]:
+                rec["tags"].append(t)
+    if args.note:
+        rec["notes"] = args.note
+    rec["rotated"] = V._now()
+    V.save(rec)
+    V.audit("set", args.name, "field=%s" % args.field)
+    sys.stderr.write("vlt: set %s.%s\n" % (args.name, args.field))
+    return 0
+
+
+# --------------------------------------------------------------------- management
+
+def cmd_init(args):
+    for d, m in ((V.ROOT, 0o700), (V.STORE, 0o700), (V.TEMPLATES, 0o700),
+                 (V.BACKUP, 0o700)):
+        os.makedirs(d, mode=m, exist_ok=True)
+        os.chmod(d, m)
+    V.master_key(create=True)
+    if not os.path.exists(V.POLICY):
+        fd = os.open(V.POLICY, os.O_WRONLY | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(V.DEFAULT_POLICY, fh, indent=2)
+    if not os.path.exists(V.GUARD):
+        V.set_guard("on")
+    if not os.path.exists(V.INDEX):
+        V.write_index({})
+    V.audit("init", "-", "vault ready at %s" % V.ROOT)
+    print("vault initialized at %s" % V.ROOT)
+    print("master key: %s" % ("gnome-keyring (%s)" % V.KEYRING_LABEL
+                              if not os.path.exists(V.FALLBACK_KEY)
+                              else "file fallback %s" % V.FALLBACK_KEY))
+    return 0
+
+
+def cmd_guard(args):
+    if args.mode == "status":
+        print(V.guard_mode())
+        return 0
+    V.set_guard(args.mode)
+    V.audit("guard", "-", "mode=%s" % args.mode)
+    print("guard mode: %s" % args.mode)
+    return 0
+
+
+def cmd_reindex(args):
+    idx = V.reindex_all()
+    print("reindexed %d secret(s)" % len(idx))
+    return 0
+
+
+def cmd_doctor(args):
+    ok = True
+    print("root        : %s" % V.ROOT)
+    for d in (V.ROOT, V.STORE):
+        mode = oct(os.stat(d).st_mode & 0o777)
+        good = mode == "0o700"
+        ok &= good
+        print("perm %-8s: %s %s" % (os.path.basename(d) or "root", mode,
+                                    "OK" if good else "SHOULD BE 0o700"))
+    try:
+        V.master_key()
+        if os.path.exists(V.FALLBACK_KEY):
+            print("master key  : PLAINTEXT FILE %s" % V.FALLBACK_KEY)
+            print("              weaker than the keyring: anything running as "
+                  "you can read it")
+            ok = False
+        else:
+            print("master key  : present (system keyring, not on disk)")
+    except Exception as exc:
+        ok = False
+        print("master key  : MISSING (%s)" % exc)
+    names = V.all_names()
+    print("secrets     : %d" % len(names))
+    bad = []
+    for n in names:
+        try:
+            V.load(n)
+        except Exception as exc:
+            bad.append((n, str(exc)))
+    if bad:
+        ok = False
+        for n, e in bad:
+            print("  UNREADABLE %s: %s" % (n, e))
+    print("guard mode  : %s" % V.guard_mode())
+    hook = os.path.expanduser("~/.claude/hooks/vault-guard.py")
+    print("guard hook  : %s" % ("installed" if os.path.exists(hook) else "MISSING"))
+    print("caller      : %s" % V.caller())
+    print("result      : %s" % ("OK" if ok else "PROBLEMS FOUND"))
+    return 0 if ok else 1
+
+
+def cmd_values(args):
+    """Internal: emit live secret values for the leak-redaction hook."""
+    if os.environ.get("VLT_INTERNAL") != "1":
+        die("internal use only", 13)
+    out = []
+    for n in V.all_names():
+        try:
+            out.extend(V.secret_values(V.load(n)))
+        except Exception:
+            pass
+    sys.stdout.write("\n".join(out))
+    return 0
+
+
+def _populated_fields(rec):
+    """Fields that currently hold a value."""
+    return ([f for f, v in rec["fields"].items() if v not in (None, "")]
+            + sorted(rec.get("extra", {}).keys()))
+
+
+def _valid_fields(rec):
+    """Every name that may legitimately be hidden, populated or not."""
+    return list(V.FIELDS) + sorted(rec.get("extra", {}).keys())
+
+
+def cmd_hide(args):
+    """[human] Choose which fields `peek` masks for this record."""
+    rec = V.load(args.name)
+    known = _populated_fields(rec)
+    valid = _valid_fields(rec)
+    cur = V.hidden_fields(rec)
+
+    if args.list:
+        print("record   : %s" % args.name)
+        print("fields   : %s" % ", ".join(known))
+        print("hidden   : %s" % (", ".join(sorted(cur)) or "(nothing)"))
+        print("shown    : %s" % (", ".join(f for f in known if f not in cur)
+                                 or "(nothing)"))
+        return 0
+
+    if args.all:
+        new = set(known)
+    elif args.none:
+        new = set()
+    else:
+        want = [f.strip() for f in (args.fields or "").split(",") if f.strip()]
+        if not want:
+            die("say which fields: vlt hide %s username,token   "
+                "(or --all / --none / --list)" % args.name)
+        unknown = [f for f in want if f not in valid]
+        if unknown:
+            die("not part of the record schema: %s\n"
+                "     valid field names: %s"
+                % (", ".join(unknown), ", ".join(valid)))
+        new = (cur - set(want)) if args.unhide else (cur | set(want))
+
+    rec["hidden"] = sorted(new)
+    V.save(rec)
+    V.audit("hide", args.name, "hidden=%s" % ",".join(sorted(new)))
+    print("hidden fields for %s: %s"
+          % (args.name, ", ".join(sorted(new)) or "(nothing)"))
+    shown = [f for f in known if f not in new]
+    if shown:
+        print("now shown in full to agents: %s" % ", ".join(shown))
+    return 0
+
+
+def cmd_rename(args):
+    """[human] Move a record to a new name, re-encrypting it."""
+    old, new = args.name, args.new_name
+    if not V.exists(old):
+        die("no such secret: %s" % old)
+    if V.exists(new) and not args.force:
+        die("%s already exists — pass --force to overwrite it" % new)
+    if not V.NAME_RE.match(new):
+        die("bad name %r — lowercase <provider>/<account>[/<purpose>], "
+            "e.g. vps/frankfurt/3x-ui" % new)
+
+    rec = V.load(old)
+    rec["name"] = new
+    rec["provider"] = new.split("/")[0]
+    V.save(rec)                       # encrypts under the new name's subkey
+    V.delete(old)
+    V.audit("rename", new, "from %s" % old)
+    sys.stderr.write("vlt: %s -> %s\n" % (old, new))
+    return cmd_peek(argparse.Namespace(name=new, chars=4))
+
+
+def cmd_ui(args):
+    """[human] Browse the vault: tree, fields, per-field masking."""
+    if not sys.stdout.isatty():
+        die("`vlt ui` needs a terminal.", 17)
+    sys.path.insert(0, os.path.dirname(os.path.realpath(V.__file__)))
+    import vltui
+    V.audit("ui", "-", "opened")
+    vltui.browse()
+    return 0
+
+
+def cmd_keyring(args):
+    """[human] List or prune the keyring entries vlt owns."""
+    try:
+        import secretstorage
+    except ImportError:
+        die("python3-secretstorage is not installed; nothing to manage.", 4)
+
+    conn = secretstorage.dbus_init()
+    try:
+        coll = secretstorage.get_default_collection(conn)
+        if coll.is_locked():
+            coll.unlock()
+        mine = []
+        for item in coll.get_all_items():
+            attrs = item.get_attributes()
+            if attrs.get("application") != "vlt":
+                continue
+            label = item.get_label()
+            root = None
+            m = re.search(r"\((.+)\)$", label)
+            if m:
+                root = m.group(1)
+            elif label == "vlt-master-identity":
+                root = os.path.join(V.HOME, ".local/share/vlt")
+            mine.append((label, root, item))
+
+        if not mine:
+            print("no vlt keys in the keyring")
+            return 0
+
+        stale = [(l, r, i) for l, r, i in mine
+                 if r and not os.path.exists(os.path.join(r, "index.json"))]
+
+        print("%-58s %s" % ("KEYRING ENTRY", "VAULT"))
+        for label, root, _ in mine:
+            state = "missing" if (label, root) in [(l, r) for l, r, _ in stale] \
+                else "present"
+            print("%-58s %s" % (label[:57], state))
+
+        if args.action == "list":
+            if stale:
+                print()
+                print("%d entr%s point at a vault that no longer exists."
+                      % (len(stale), "y" if len(stale) == 1 else "ies"))
+                print("Remove them with:  VLT_HUMAN=1 vlt keyring prune")
+            return 0
+
+        if not stale:
+            print()
+            print("nothing to prune")
+            return 0
+
+        print()
+        print("About to delete %d key(s) for vaults that no longer exist."
+              % len(stale))
+        print("If one of those vaults is only temporarily unmounted, its "
+              "secrets become")
+        print("unreadable for ever. Nothing else is touched.")
+        if not args.yes:
+            if input("proceed? [y/N] ").lower() != "y":
+                return 1
+        for label, _, item in stale:
+            item.delete()
+            V.audit("keyring-prune", "-", "deleted %s" % label)
+            print("deleted %s" % label)
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------- scan / import
+
+SCAN_SKIP = re.compile(
+    r"/(?:node_modules|\.git|venv|\.venv|__pycache__|\.cache|site-packages|"
+    r"\.npm|\.nvm/versions|\.local/share/Trash|snap|\.mozilla|\.steam/steamapps|"
+    r"\.cargo/registry|\.gradle|\.m2/repository|dist-packages|"
+    r"\.vscode/extensions|\.vscode-server|\.choosenim|\.dotnet|\.rustup|"
+    r"Android/Sdk|\.arduino15|\.android/build-cache|\.gem|\.rbenv|"
+    r"anyconnect-linux64|\.wine|\.local/lib/python[0-9.]+|"
+    r"\.config/Code/|\.mozilla|\.thunderbird|\.pki/nssdb)/""")
+
+# 2. NEVER print fragments of key material: only extract identifier-shaped keys
+#    from text config files, and never from PEM/binary/cert files.
+BINARYISH = re.compile(r"\.(?:pem|pfx|p12|jks|keystore|der|crt|cer|key)$", re.I)
+IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{1,39}$")
+
+SCAN_NAMES = re.compile(
+    r"(?:^\.env(?!\.(?:example|sample|template|dist|tpl)$)(?:\..+)?$"
+    r"|^\.netrc$|^_netrc$|^\.npmrc$|^\.pypirc$|^\.git-credentials$"
+    r"|^credentials(?:\..+)?$|^secrets?\.(?:json|ya?ml|env|txt|py|js|ts)$"
+    r"|^.*token.*\.(?:txt|json)$|^.*\.(?:pem|pfx|p12|jks)$"
+    r"|^id_(?:rsa|dsa|ecdsa|ed[0-9]+)$)", re.IGNORECASE)
+
+SCAN_CONTENT = re.compile(
+    r"(?:BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20}|github_pat_[A-Za-z0-9_]{20}"
+    r"|sk-[A-Za-z0-9]{20}|xox[baprs]-[A-Za-z0-9-]{10}|AKIA[A-Z0-9]{16}"
+    r"|AIza[A-Za-z0-9_-]{30}|glpat-[A-Za-z0-9_-]{15}"
+    r"|(?:api[_-]?key|apikey|password|passwd|secret|token)\s*[=:]\s*"
+    r"[\"\']?[A-Za-z0-9_\-./+]{8,})", re.IGNORECASE)
+
+MACHINE_KEEP = re.compile(
+    r"(?:/\.cert/nm-openvpn/|/\.config/kdeconnect/|/\.mitmproxy/"
+    r"|/\.claude/\.credentials\.json$|/\.ssh/id_[^/]*$|/known_hosts)")
+
+
+def _suggest(path):
+    base = os.path.basename(path).lower()
+    parent = os.path.basename(os.path.dirname(path)).lower()
+    parent = re.sub(r"[^a-z0-9._-]+", "-", parent).strip("-") or "misc"
+    if base in (".netrc", "_netrc"):
+        return "heroku.com/mbadriah", "login"
+    if base == ".npmrc":
+        return "npmjs.com/mbadriah", "token"
+    if base == ".pypirc":
+        return "pypi.org/mbadriah", "token"
+    if base.startswith(".env"):
+        return "project/%s" % parent, "service"
+    if base.endswith((".pem", ".p12", ".pfx", ".jks")):
+        return "cert/%s" % re.sub(r"[^a-z0-9._-]+", "-", base.rsplit(".", 1)[0]), "cert"
+    if base.startswith("id_"):
+        return "ssh/%s" % base[3:], "ssh"
+    return "project/%s" % parent, "service"
+
+
+def cmd_scan(args):
+    roots = args.root or [os.path.expanduser("~")]
+    hits = []
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            if SCAN_SKIP.search(dirpath + "/"):
+                dirnames[:] = []
+                continue
+            depth = dirpath[len(root):].count(os.sep)
+            if depth >= args.depth:
+                dirnames[:] = []
+            for fn in filenames:
+                fp = os.path.join(dirpath, fn)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                if st.st_size == 0 or st.st_size > 512 * 1024:
+                    continue
+                why = None
+                if SCAN_NAMES.match(fn):
+                    why = "name"
+                    if BINARYISH.search(fn):
+                        # a public cert or CA bundle is not a secret
+                        try:
+                            with open(fp, "r", errors="ignore") as fh:
+                                head = fh.read(200000)
+                        except OSError:
+                            continue
+                        if "PRIVATE KEY" not in head and not fn.lower().endswith(
+                                (".pfx", ".p12", ".jks", ".keystore")):
+                            continue
+                elif args.deep and fn.endswith(
+                        (".json", ".yaml", ".yml", ".ini", ".cfg", ".conf",
+                         ".sh", ".py", ".js", ".ts", ".txt")):
+                    try:
+                        with open(fp, "r", errors="ignore") as fh:
+                            if SCAN_CONTENT.search(fh.read(65536)):
+                                why = "content"
+                    except OSError:
+                        continue
+                if not why:
+                    continue
+                keys = []
+                if not BINARYISH.search(fn):
+                    try:
+                        with open(fp, "r", errors="ignore") as fh:
+                            for ln in fh.read(65536).splitlines():
+                                if ln.strip().startswith(("#", ";", "//")):
+                                    continue
+                                m = re.match(
+                                    r"\s*(?:export\s+)?([A-Za-z0-9_.-]{2,40})\s*[=:]",
+                                    ln)
+                                # an identifier, never a slice of key material
+                                if m and IDENT_RE.match(m.group(1)):
+                                    keys.append(m.group(1))
+                    except OSError:
+                        pass
+                name, rtype = _suggest(fp)
+                hits.append({
+                    "path": fp, "why": why, "bytes": st.st_size,
+                    "mode": oct(st.st_mode & 0o777),
+                    "mtime": time.strftime("%Y-%m-%d", time.localtime(st.st_mtime)),
+                    "keys": sorted(set(keys))[:12],
+                    "suggest": name, "type": rtype,
+                    "machine_operational": bool(MACHINE_KEEP.search(fp)),
+                })
+    hits.sort(key=lambda h: (h["machine_operational"], h["path"]))
+    V.audit("scan", "-", "%d candidate file(s)" % len(hits))
+
+    if args.json:
+        print(json.dumps(hits, indent=2))
+        return 0
+    move = [h for h in hits if not h["machine_operational"]]
+    keep = [h for h in hits if h["machine_operational"]]
+    print("CREDENTIAL INVENTORY  (%d file(s); NOTHING has been changed)" % len(hits))
+    print()
+    print("MIGRATE INTO THE VAULT  (%d)" % len(move))
+    print("-" * 78)
+    for h in move:
+        print("  %s" % h["path"])
+        print("      %s bytes, mode %s, modified %s, matched by %s"
+              % (h["bytes"], h["mode"], h["mtime"], h["why"]))
+        if h["keys"]:
+            print("      keys: %s" % ", ".join(h["keys"]))
+        print("      suggested: vlt import '%s' --name %s --type %s"
+              % (h["path"], h["suggest"], h["type"]))
+    print()
+    print("LEAVE IN PLACE — the OS needs these where they are  (%d)" % len(keep))
+    print("-" * 78)
+    for h in keep:
+        print("  %s   (mode %s)" % (h["path"], h["mode"]))
+    print()
+    print("No file was read into this transcript, moved or deleted.")
+    print("Import one with:  VLT_HUMAN=1 vlt import <path> --name <name>")
+    return 0
+
+
+def _parse_credfile(path):
+    """Best-effort key/value extraction. Returns dict."""
+    out = {}
+    base = os.path.basename(path).lower()
+    try:
+        with open(path, "r", errors="ignore") as fh:
+            text = fh.read()
+    except OSError as exc:
+        die("cannot read %s: %s" % (path, exc))
+    if base in (".netrc", "_netrc"):
+        toks = text.split()
+        cur = None
+        for i, t in enumerate(toks):
+            if t == "machine" and i + 1 < len(toks):
+                cur = toks[i + 1]
+                out.setdefault("host", cur)
+            elif t == "login" and i + 1 < len(toks):
+                out.setdefault("username", toks[i + 1])
+            elif t == "password" and i + 1 < len(toks):
+                out.setdefault("password", toks[i + 1])
+        return out
+    if base.endswith((".pem", ".p12", ".pfx", ".jks")) or base.startswith("id_"):
+        return {"key": text}
+    if text.lstrip().startswith("{"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, (str, int)):
+                        out[k] = str(v)
+                return out
+        except Exception:
+            pass
+    seen = {}
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith(("#", ";", "//")):
+            continue
+        m = re.match(r"(?:export\s+)?([A-Za-z0-9_.-]+)\s*[=:]\s*(.*)$", ln)
+        if not m:
+            continue
+        k, v = m.group(1), m.group(2).strip().strip("\"\'")
+        if not v:
+            continue
+        # A file listing several servers repeats keys. Keep every occurrence,
+        # suffixed, rather than letting the last one win silently.
+        seen[k] = seen.get(k, 0) + 1
+        out[k if seen[k] == 1 else "%s_%d" % (k, seen[k])] = v
+    return out
+
+
+FIELD_ALIASES = {
+    "user": "username", "usr": "username", "login": "username",
+    "uname": "username", "email": "username",
+    "pass": "password", "pwd": "password", "passwd": "password",
+    "apikey": "key", "api_key": "key", "access_key": "key",
+    "access_token": "token", "auth_token": "token", "authtoken": "token",
+    "api_token": "token", "apitoken": "token", "bot_token": "token",
+    "secret_key": "secret", "client_secret": "secret", "private_key": "key",
+    "hostname": "host", "server": "host", "ip": "host", "addr": "host",
+    "endpoint": "url", "panel": "url", "dashboard": "url", "webhook": "url",
+    "database": "path", "db": "path",
+}
+
+
+def canonical_field(name):
+    """Map a field name onto the schema vocabulary, case-insensitively.
+
+    Returns (canonical_name, was_remapped). Names with no mapping are left
+    alone and end up in `extra` — still masked, but outside the uniform shape.
+    """
+    low = name.strip().lower()
+    if low in V.FIELDS:
+        return low, low != name
+    if low in FIELD_ALIASES:
+        return FIELD_ALIASES[low], True
+    return name, False
+
+
+def cmd_import(args):
+    src = os.path.abspath(os.path.expanduser(args.path))
+    if not os.path.exists(src):
+        die("no such file: %s" % src)
+    raw = _parse_credfile(src)
+    if not raw:
+        die("found no key/value pairs in %s" % src)
+    name = args.name or _suggest(src)[0]
+    rec = V.load(name) if V.exists(name) else V.blank_record(name, args.type)
+    n = 0
+    for k, v in raw.items():
+        if v in (None, ""):
+            continue
+        lk = k.lower().lstrip("_")
+        field = FIELD_ALIASES.get(lk, lk if lk in V.FIELDS else None)
+        if field:
+            rec["fields"][field] = v
+            rec["env_map"].setdefault(k.upper(), field)
+        else:
+            rec["extra"][k] = v
+            rec["env_map"].setdefault(k.upper(), k)
+        n += 1
+    dupes = sorted({re.sub(r"_\d+$", "", k) for k in raw
+                    if re.search(r"_\d+$", k)})
+    if dupes:
+        sys.stderr.write(
+            "vlt: NOTE %s repeats %s — it probably describes more than one host.\n"
+            "vlt: all occurrences were kept as <key>_2, <key>_3 in `extra`.\n"
+            "vlt: consider splitting them into separate records, one per host.\n"
+            % (os.path.basename(src), ", ".join(dupes)))
+    rec["notes"] = (rec.get("notes") or "") or ("imported from %s" % src)
+    if "imported" not in rec["tags"]:
+        rec["tags"].append("imported")
+    rec["rotated"] = V._now()
+    V.save(rec)
+    V.audit("import", name, "from %s, %d field(s)" % (src, n))
+    sys.stderr.write("vlt: imported %d field(s) from %s -> %s\n" % (n, src, name))
+    sys.stderr.write("vlt: the ORIGINAL FILE WAS NOT TOUCHED: %s\n" % src)
+    return cmd_peek(argparse.Namespace(name=name, chars=4))
+
+
+
+def cmd_identity(args):
+    """[human] Back up or restore the master key. Without a backup, losing
+    gnome-keyring means losing every secret in the vault, permanently."""
+    import base64
+    if args.action == "export":
+        key = V.master_key()
+        out = os.path.abspath(os.path.expanduser(args.out))
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o400)
+        with os.fdopen(fd, "w") as fh:
+            fh.write("# vlt master key - ANYONE WITH THIS FILE CAN DECRYPT THE\n"
+                     "# ENTIRE VAULT. Keep it offline (paper, USB in a drawer).\n"
+                     "# Restore with:  VLT_HUMAN=1 vlt identity <import> <thisfile>\n")
+            fh.write("VLT-MASTER-V1:" + base64.b64encode(key).decode() + "\n")
+        V.audit("identity-export", "-", "-> %s" % out)
+        sys.stderr.write(
+            "vlt: master key written to %s (mode 0400).\n"
+            "vlt: MOVE IT OFF THIS MACHINE. It decrypts everything.\n" % out)
+        return 0
+
+    src = os.path.abspath(os.path.expanduser(args.out))
+    if not os.path.exists(src):
+        die("no such file: %s" % src)
+    key = None
+    with open(src) as fh:
+        for ln in fh:
+            if ln.startswith("VLT-MASTER-V1:"):
+                key = base64.b64decode(ln.split(":", 1)[1].strip())
+    if not key or len(key) != 32:
+        die("no valid VLT-MASTER-V1 line in %s" % src)
+    V._keyring_set(key)
+    if V._keyring_get() != key:
+        fd = os.open(V.FALLBACK_KEY, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o400)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key)
+    V._MASTER = None
+    V.audit("identity-import", "-", "from %s" % src)
+    sys.stderr.write("vlt: master key restored. Run `vlt doctor` to verify.\n")
+    return 0
+
+
+# ------------------------------------------------------------------------- parser
+
+def main():
+    p = argparse.ArgumentParser(prog="vlt", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="_sub")
+
+    s = sub.add_parser("init", help="create the vault and master key")
+    s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("list", help="list secrets (names/fields only, no values)")
+    s.add_argument("glob", nargs="?")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_list)
+
+    s = sub.add_parser("peek", help="show STRUCTURE of a secret, not its value")
+    s.add_argument("name")
+    s.add_argument("--chars", type=int, default=4,
+                   help="leading chars of secret fields to reveal (default 4)")
+    s.set_defaults(fn=cmd_peek)
+
+    s = sub.add_parser("exec", help="run a command with the secret in its environment")
+    s.add_argument("name", help="secret name, or comma-separated names")
+    s.add_argument("--allow-interpolation", action="store_true",
+                   help="[human] permit $VAR on the child command line")
+    s.add_argument("cmd", nargs=argparse.REMAINDER)
+    s.set_defaults(fn=cmd_exec)
+
+    s = sub.add_parser("file", help="write one field straight to a file")
+    s.add_argument("name")
+    s.add_argument("field")
+    s.add_argument("--out", required=True)
+    s.add_argument("--mode", default="0600")
+    s.add_argument("--newline", action="store_true")
+    s.set_defaults(fn=cmd_file)
+
+    s = sub.add_parser("render", help="fill a template and write it to a file")
+    s.add_argument("--secret", action="append", required=True)
+    s.add_argument("--template")
+    s.add_argument("--out", required=True)
+    s.add_argument("--mode", default="0600")
+    s.add_argument("--allow-unresolved", action="store_true")
+    s.set_defaults(fn=cmd_render)
+
+    s = sub.add_parser("request", help="ask the human for a missing secret")
+    s.add_argument("name")
+    s.add_argument("--fields", default="username,password")
+    s.add_argument("--type", default="token", choices=V.TYPES)
+    s.add_argument("--reason", default="")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_request)
+
+    s = sub.add_parser("scan", help="inventory credential files (report only)")
+    s.add_argument("root", nargs="*")
+    s.add_argument("--depth", type=int, default=6)
+    s.add_argument("--deep", action="store_true",
+                   help="also match on file CONTENT, not just filename")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_scan)
+
+    s = sub.add_parser("import", help="[human] import a credential file (copies, "
+                                      "never deletes the original)")
+    s.add_argument("path")
+    s.add_argument("--name")
+    s.add_argument("--type", default="service", choices=V.TYPES)
+    s.set_defaults(fn=cmd_import)
+
+    s = sub.add_parser("audit", help="show the access log")
+    s.add_argument("--tail", type=int, default=40)
+    s.add_argument("--name")
+    s.add_argument("--session",
+                   help="only entries from this session id (prefix is enough)")
+    s.set_defaults(fn=cmd_audit)
+
+    s = sub.add_parser("get", help="[human] print one field")
+    s.add_argument("name")
+    s.add_argument("field")
+    s.set_defaults(fn=cmd_get)
+
+    s = sub.add_parser("show", help="[human] print the whole record")
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("add", help="[human] add a secret in a separate window")
+    s.add_argument("name")
+    s.add_argument("--fields")
+    s.add_argument("--type", default="token", choices=V.TYPES)
+    s.set_defaults(fn=cmd_add)
+
+    s = sub.add_parser("set", help="[human] set one field non-interactively")
+    s.add_argument("name")
+    s.add_argument("field")
+    s.add_argument("value", help="value, or - to read stdin")
+    s.add_argument("--type", default="token", choices=V.TYPES)
+    s.add_argument("--env", help="env var name to map this field to")
+    s.add_argument("--tag")
+    s.add_argument("--note")
+    s.set_defaults(fn=cmd_set)
+
+    s = sub.add_parser("rm", help="[human] delete a secret")
+    s.add_argument("name")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_rm)
+
+    s = sub.add_parser("hide",
+                       help="[human] choose which fields `peek` masks")
+    s.add_argument("name")
+    s.add_argument("fields", nargs="?",
+                   help="comma-separated field names")
+    s.add_argument("--all", action="store_true", help="hide every field")
+    s.add_argument("--none", action="store_true", help="hide nothing")
+    s.add_argument("--list", action="store_true",
+                   help="show what is hidden and what is not")
+    s.add_argument("--unhide", action="store_true",
+                   help="remove the named fields from the hidden set")
+    s.set_defaults(fn=cmd_hide)
+
+    s = sub.add_parser("unhide", help="[human] reveal fields in `peek`")
+    s.add_argument("name")
+    s.add_argument("fields", nargs="?")
+    s.add_argument("--all", action="store_true", help=argparse.SUPPRESS)
+    s.add_argument("--none", action="store_true", help=argparse.SUPPRESS)
+    s.add_argument("--list", action="store_true", help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_hide, unhide=True)
+
+    s = sub.add_parser("rename", help="[human] rename a secret, keeping its value")
+    s.add_argument("name")
+    s.add_argument("new_name")
+    s.add_argument("--force", action="store_true",
+                   help="overwrite the destination if it exists")
+    s.set_defaults(fn=cmd_rename)
+
+    s = sub.add_parser("ui", help="[human] browse the vault in a terminal UI")
+    s.set_defaults(fn=cmd_ui)
+
+    s = sub.add_parser("keyring",
+                       help="[human] list or prune vlt's keyring entries")
+    s.add_argument("action", choices=["list", "prune"], nargs="?",
+                   default="list")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_keyring)
+
+    s = sub.add_parser("guard", help="set hook enforcement: on|warn|off|status")
+    s.add_argument("mode", choices=["on", "warn", "off", "status"])
+    s.set_defaults(fn=cmd_guard)
+
+    s = sub.add_parser("reindex", help="rebuild index.json from the store")
+    s.set_defaults(fn=cmd_reindex)
+
+    s = sub.add_parser("identity",
+                       help="[human] back up / restore the master key")
+    s.add_argument("action", choices=["export", "import"])
+    s.add_argument("out", help="file to write to / read from")
+    s.set_defaults(fn=cmd_identity)
+
+    s = sub.add_parser("doctor", help="check vault health")
+    s.set_defaults(fn=cmd_doctor)
+
+    s = sub.add_parser("_values", help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_values)
+
+    s = sub.add_parser("_prompt", help=argparse.SUPPRESS)
+    s.add_argument("payload")
+    s.set_defaults(fn=cmd__prompt)
+
+    args = p.parse_args()
+    if not getattr(args, "fn", None):
+        p.print_help()
+        return 0
+    subcmd = getattr(args, "_sub", None)
+    agent_block(subcmd)
+    if subcmd in NEEDS_CONFIRM:
+        name = getattr(args, "name", "")
+        confirm_human(subcmd, name if isinstance(name, str) else "")
+    try:
+        return args.fn(args)
+    except V.Denied as exc:
+        die(str(exc), 13)
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

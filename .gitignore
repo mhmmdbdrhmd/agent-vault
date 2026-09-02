@@ -1,0 +1,43 @@
+# --- secrets: first, because this is the one that is irreversible ------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/public*.key
+id_rsa*
+id_ed25519*
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+secrets.*
+.netrc
+
+# --- python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.tox/
+
+# --- notebooks: outputs can contain tokens and data --------------------------
+.ipynb_checkpoints/
+
+# --- os / editor ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# --- local scratch ----------------------------------------------------------
+scratch/
+tmp/
+*.log
