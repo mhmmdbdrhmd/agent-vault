@@ -11,9 +11,7 @@ import json
 import os
 import re
 import secrets
-import stat
 import sys
-import time
 from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives import hashes
@@ -149,47 +147,202 @@ class Denied(Exception):
 
 # -------------------------------------------------------------------------- crypto
 
+# Two keyring backends, chosen by platform. Both hold the same 32 raw bytes;
+# only the transport encoding differs, because the macOS `security` tool speaks
+# text on a pipe and the Secret Service speaks bytes over D-Bus.
+
+SECURITY = "/usr/bin/security"          # the macOS keychain CLI
+
+
+def keyring_backend():
+    """'macos', 'secretservice', or None when the caller has opted out."""
+    if os.environ.get("VLT_NO_KEYRING") == "1":
+        return None
+    forced = os.environ.get("VLT_KEYRING_BACKEND")
+    if forced:
+        return forced
+    if sys.platform == "darwin" and os.path.exists(SECURITY):
+        return "macos"
+    return "secretservice"
+
+
 def _use_keyring():
     """False when the caller has opted out — tests, or a deliberate file key."""
-    return os.environ.get("VLT_NO_KEYRING") != "1"
+    return keyring_backend() is not None
 
 
-def _keyring_get():
-    if not _use_keyring():
+# --------------------------------------------------------- macOS login keychain
+
+def _mac(args, check=False):
+    import subprocess
+    r = subprocess.run([SECURITY] + args, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or
+                           "security %s failed (%d)" % (args[0], r.returncode))
+    return r
+
+
+def _mac_get(label=None, account=None):
+    import base64
+    import binascii
+    r = _mac(["find-generic-password", "-s", label or KEYRING_LABEL,
+              "-a", account or _KEYRING_PURPOSE, "-w"])
+    if r.returncode != 0:
         return None
+    text = r.stdout.strip()
+    if not text:
+        return None
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        return text.encode()
+
+
+def _mac_set(raw, label=None, account=None):
+    import base64
+    label = label or KEYRING_LABEL
+    account = account or _KEYRING_PURPOSE
+    _mac(["delete-generic-password", "-s", label, "-a", account])
+    # -A means any process running as this user may read it with no per-use
+    # prompt. That is the same trust model gnome-keyring gives on Linux, and it
+    # is what "no passphrase on every use" costs. See docs/THREAT-MODEL.md.
+    #
+    # The key passes through argv for the length of this one call, so `ps` can
+    # see it for that instant. It happens on `vlt init` and `vlt identity
+    # import` only — never on a read — and the keychain CLI has no way to take
+    # a password on stdin without a terminal to prompt at.
+    _mac(["add-generic-password", "-U", "-A",
+          "-s", label, "-a", account,
+          "-D", "agent-vault master key",
+          "-j", "AES-256 master key for the vlt credential vault",
+          "-w", base64.b64encode(raw).decode()], check=True)
+
+
+def _mac_items():
+    """Every vlt-owned keychain item as (label, account). Reveals no secret.
+
+    `dump-keychain` without -d prints attributes only, and does not prompt.
+    """
+    r = _mac(["dump-keychain"])
+    if r.returncode != 0:
+        return []
+    out, svce, acct = [], None, None
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("keychain:"):
+            svce = acct = None
+            continue
+        m = re.match(r'"(svce|acct)"<blob>=(?:"(.*)"|<NULL>)$', line)
+        if not m:
+            continue
+        if m.group(1) == "svce":
+            svce = m.group(2)
+        else:
+            acct = m.group(2)
+        if svce and acct and svce.startswith("vlt-master-identity"):
+            out.append((svce, acct))
+            svce = acct = None
+    return out
+
+
+def _mac_delete(label, account):
+    _mac(["delete-generic-password", "-s", label, "-a", account], check=True)
+    return True
+
+
+# ------------------------------------------------------- Secret Service (Linux)
+
+def _ss_collection(conn):
+    import secretstorage
+    coll = secretstorage.get_default_collection(conn)
+    if coll.is_locked():
+        coll.unlock()
+    return coll
+
+
+def _ss(fn):
+    """Run fn(collection) on a connection that is always closed afterwards."""
     import secretstorage
     conn = secretstorage.dbus_init()
     try:
-        coll = secretstorage.get_default_collection(conn)
-        if coll.is_locked():
-            coll.unlock()
+        return fn(_ss_collection(conn))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _ss_get():
+    def go(coll):
         for item in coll.search_items(KEYRING_ATTRS):
             return item.get_secret()
         return None
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    return _ss(go)
 
 
-def _keyring_set(raw):
-    if not _use_keyring():
-        raise RuntimeError("keyring disabled by VLT_NO_KEYRING")
-    import secretstorage
-    conn = secretstorage.dbus_init()
-    try:
-        coll = secretstorage.get_default_collection(conn)
-        if coll.is_locked():
-            coll.unlock()
+def _ss_set(raw):
+    def go(coll):
         for item in coll.search_items(KEYRING_ATTRS):
             item.delete()
         coll.create_item(KEYRING_LABEL, KEYRING_ATTRS, raw, replace=True)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    return _ss(go)
+
+
+def _ss_items():
+    def go(coll):
+        out = []
+        for item in coll.get_all_items():
+            attrs = item.get_attributes()
+            if attrs.get("application") == "vlt":
+                out.append((item.get_label(), attrs.get("purpose", "")))
+        return out
+    return _ss(go)
+
+
+def _ss_delete(label, account):
+    def go(coll):
+        for item in coll.get_all_items():
+            attrs = item.get_attributes()
+            if (attrs.get("application") == "vlt"
+                    and item.get_label() == label
+                    and attrs.get("purpose", "") == account):
+                item.delete()
+                return True
+        return False
+    return _ss(go)
+
+
+# --------------------------------------------------------------------- dispatch
+
+def _keyring_get():
+    b = keyring_backend()
+    if b is None:
+        return None
+    return _mac_get() if b == "macos" else _ss_get()
+
+
+def _keyring_set(raw):
+    b = keyring_backend()
+    if b is None:
+        raise RuntimeError("keyring disabled by VLT_NO_KEYRING")
+    return _mac_set(raw) if b == "macos" else _ss_set(raw)
+
+
+def keyring_items():
+    """(label, account) for every entry vlt owns, on whichever backend is live."""
+    b = keyring_backend()
+    if b is None:
+        return []
+    return _mac_items() if b == "macos" else _ss_items()
+
+
+def keyring_delete(label, account):
+    b = keyring_backend()
+    if b is None:
+        return False
+    return _mac_delete(label, account) if b == "macos" \
+        else _ss_delete(label, account)
 
 
 _MASTER = None
@@ -225,17 +378,21 @@ def master_key(create=False):
             # A plaintext key on disk is a different, weaker security model.
             # It must be chosen, never fallen into.
             if os.environ.get("VLT_ALLOW_FILE_KEY") != "1":
+                which = ("the macOS login keychain"
+                         if sys.platform == "darwin"
+                         else "a Secret Service keyring (gnome-keyring, "
+                              "kwallet, keepassxc)")
                 raise Denied(
-                    "no Secret Service keyring is available%s.\n"
-                    "     vlt keeps its master key in the keyring so that it is "
-                    "not a readable file.\n"
+                    "no system keyring is available%s.\n"
+                    "     vlt wants %s\n"
+                    "     so that the master key is not a readable file.\n"
                     "     Without one, the key must live in %s at mode 0400, "
                     "which is a\n"
                     "     weaker model: anything running as you can read it "
                     "directly.\n"
                     "     If you accept that, re-run with "
                     "VLT_ALLOW_FILE_KEY=1."
-                    % ((": " + err) if err else "", FALLBACK_KEY))
+                    % ((": " + err) if err else "", which, FALLBACK_KEY))
             fd = os.open(FALLBACK_KEY, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o400)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(raw)

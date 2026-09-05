@@ -72,16 +72,28 @@ def confirm_human(cmd, detail=""):
     except Exception:
         pass
 
-    if shutil.which("zenity") and os.environ.get("DISPLAY"):
-        msg = ("A process is asking to run:\n\n    vlt %s %s\n\n"
-               "This can expose credential values.\n"
-               "Allow it only if you started it yourself." % (cmd, detail))
-        r = subprocess.run(
-            ["zenity", "--question", "--title", "vlt — confirm",
-             "--text", msg, "--ok-label", "Allow", "--cancel-label", "Deny",
-             "--default-cancel"],
-            capture_output=True)
-        if r.returncode == 0:
+    msg = ("A process is asking to run:\n\n    vlt %s %s\n\n"
+           "This can expose credential values.\n"
+           "Allow it only if you started it yourself." % (cmd, detail))
+
+    dialog = None
+    if sys.platform == "darwin" and shutil.which("osascript"):
+        script = ('display dialog %s with title "vlt \u2014 confirm" '
+                  'buttons {"Deny", "Allow"} default button "Deny" '
+                  'with icon caution' % json.dumps(msg))
+        dialog = ["osascript", "-e", script]
+        # osascript exits 0 for BOTH buttons; only Esc gives non-zero. The
+        # answer is in stdout, so it has to be read rather than inferred.
+        approved = lambda r: b"Allow" in r.stdout
+    elif shutil.which("zenity") and os.environ.get("DISPLAY"):
+        dialog = ["zenity", "--question", "--title", "vlt \u2014 confirm",
+                  "--text", msg, "--ok-label", "Allow",
+                  "--cancel-label", "Deny", "--default-cancel"]
+        approved = lambda r: True          # zenity says Deny with exit 1
+
+    if dialog:
+        r = subprocess.run(dialog, capture_output=True)
+        if r.returncode == 0 and approved(r):
             V.audit("confirm", detail or "-", "approved at the desktop for %s" % cmd)
             return
         V.audit("confirm", detail or "-", "denied at the desktop for %s" % cmd,
@@ -105,7 +117,31 @@ def _term_prompt(spec):
     helper = [sys.executable, os.path.abspath(__file__), "_prompt", payload.name]
 
     launched = False
-    if shutil.which("gnome-terminal") and os.environ.get("DISPLAY"):
+    if sys.platform == "darwin" and shutil.which("osascript"):
+        # Terminal.app's `do script` returns as soon as the window opens, so
+        # there is nothing to wait on. The helper drops a marker beside the
+        # payload when the person is finished, and that is what is waited for.
+        done = payload.name + ".done"
+        quoted = " ".join("'%s'" % a.replace("'", "'\\''") for a in helper)
+        try:
+            subprocess.run(
+                ["osascript", "-e",
+                 'tell application "Terminal" to do script %s'
+                 % json.dumps("%s; touch %s; exit" % (quoted, done)),
+                 "-e", 'tell application "Terminal" to activate'],
+                check=False, timeout=30)
+            deadline = time.time() + 900
+            while time.time() < deadline and not os.path.exists(done):
+                time.sleep(0.4)
+            launched = os.path.exists(done)
+        except Exception:
+            launched = False
+        finally:
+            try:
+                os.unlink(done)
+            except OSError:
+                pass
+    if not launched and shutil.which("gnome-terminal") and os.environ.get("DISPLAY"):
         try:
             subprocess.run(
                 ["gnome-terminal", "--wait", "--title",
@@ -684,6 +720,7 @@ def cmd_doctor(args):
             ok = False
         else:
             print("master key  : present (system keyring, not on disk)")
+            print("keyring     : %s" % (V.keyring_backend() or "disabled"))
     except Exception as exc:
         ok = False
         print("master key  : MISSING (%s)" % exc)
@@ -783,7 +820,7 @@ def cmd_rename(args):
         die("%s already exists — pass --force to overwrite it" % new)
     if not V.NAME_RE.match(new):
         die("bad name %r — lowercase <provider>/<account>[/<purpose>], "
-            "e.g. vps/frankfurt/3x-ui" % new)
+            "e.g. vps/beta/3x-ui" % new)
 
     rec = V.load(old)
     rec["name"] = new
@@ -807,89 +844,85 @@ def cmd_ui(args):
 
 
 def cmd_keyring(args):
-    """[human] List or prune the keyring entries vlt owns."""
+    """[human] List or prune the keyring entries vlt owns, on either backend."""
+    backend = V.keyring_backend()
+    if backend is None:
+        die("keyring access is disabled (VLT_NO_KEYRING=1).", 4)
     try:
-        import secretstorage
+        mine = V.keyring_items()
     except ImportError:
-        die("python3-secretstorage is not installed; nothing to manage.", 4)
+        die("no keyring library is available on this system; nothing to manage.",
+            4)
+    except Exception as exc:
+        die("could not reach the keyring: %s" % exc, 4)
 
-    conn = secretstorage.dbus_init()
-    try:
-        coll = secretstorage.get_default_collection(conn)
-        if coll.is_locked():
-            coll.unlock()
-        mine = []
-        for item in coll.get_all_items():
-            attrs = item.get_attributes()
-            if attrs.get("application") != "vlt":
-                continue
-            label = item.get_label()
-            root = None
-            m = re.search(r"\((.+)\)$", label)
-            if m:
-                root = m.group(1)
-            elif label == "vlt-master-identity":
-                root = os.path.join(V.HOME, ".local/share/vlt")
-            mine.append((label, root, item))
-
-        if not mine:
-            print("no vlt keys in the keyring")
-            return 0
-
-        stale = [(l, r, i) for l, r, i in mine
-                 if r and not os.path.exists(os.path.join(r, "index.json"))]
-
-        print("%-58s %s" % ("KEYRING ENTRY", "VAULT"))
-        for label, root, _ in mine:
-            state = "missing" if (label, root) in [(l, r) for l, r, _ in stale] \
-                else "present"
-            print("%-58s %s" % (label[:57], state))
-
-        if args.action == "list":
-            if stale:
-                print()
-                print("%d entr%s point at a vault that no longer exists."
-                      % (len(stale), "y" if len(stale) == 1 else "ies"))
-                print("Remove them with:  VLT_HUMAN=1 vlt keyring prune")
-            return 0
-
-        if not stale:
-            print()
-            print("nothing to prune")
-            return 0
-
-        print()
-        print("About to delete %d key(s) for vaults that no longer exist."
-              % len(stale))
-        print("If one of those vaults is only temporarily unmounted, its "
-              "secrets become")
-        print("unreadable for ever. Nothing else is touched.")
-        if not args.yes:
-            if input("proceed? [y/N] ").lower() != "y":
-                return 1
-        for label, _, item in stale:
-            item.delete()
-            V.audit("keyring-prune", "-", "deleted %s" % label)
-            print("deleted %s" % label)
+    if not mine:
+        print("no vlt keys in the %s keyring" % backend)
         return 0
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
+    def vault_of(label):
+        """Which vault an entry belongs to, from the label vlt wrote."""
+        m = re.search(r"\((.+)\)$", label)
+        if m:
+            return m.group(1)
+        if label == "vlt-master-identity":
+            return os.path.join(V.HOME, ".local/share/vlt")
+        return None
+
+    rows = []
+    for label, account in mine:
+        root = vault_of(label)
+        gone = bool(root) and not os.path.exists(os.path.join(root, "index.json"))
+        rows.append((label, account, root, gone))
+    stale = [r for r in rows if r[3]]
+
+    print("backend: %s" % backend)
+    print("%-58s %s" % ("KEYRING ENTRY", "VAULT"))
+    for label, _, _, gone in rows:
+        print("%-58s %s" % (label[:57], "missing" if gone else "present"))
+
+    if args.action == "list":
+        if stale:
+            print()
+            print("%d entr%s point at a vault that no longer exists."
+                  % (len(stale), "y" if len(stale) == 1 else "ies"))
+            print("Remove them with:  VLT_HUMAN=1 vlt keyring prune")
+        return 0
+
+    if not stale:
+        print()
+        print("nothing to prune")
+        return 0
+
+    print()
+    print("About to delete %d key(s) for vaults that no longer exist."
+          % len(stale))
+    print("If one of those vaults is only temporarily unmounted, its secrets "
+          "become")
+    print("unreadable for ever. Nothing else is touched.")
+    if not args.yes:
+        if input("proceed? [y/N] ").lower() != "y":
+            return 1
+    for label, account, _, _ in stale:
+        V.keyring_delete(label, account)
+        V.audit("keyring-prune", "-", "deleted %s" % label)
+        print("deleted %s" % label)
+    return 0
 
 # --------------------------------------------------------------- scan / import
 
 SCAN_SKIP = re.compile(
     r"/(?:node_modules|\.git|venv|\.venv|__pycache__|\.cache|site-packages|"
     r"\.npm|\.nvm/versions|\.local/share/Trash|snap|\.mozilla|\.steam/steamapps|"
+# Directories with nothing of ours in them. Walking them is slow and noisy, and
+# a hit inside a package cache is somebody else's fixture, not your secret.
     r"\.cargo/registry|\.gradle|\.m2/repository|dist-packages|"
     r"\.vscode/extensions|\.vscode-server|\.choosenim|\.dotnet|\.rustup|"
     r"Android/Sdk|\.arduino15|\.android/build-cache|\.gem|\.rbenv|"
     r"anyconnect-linux64|\.wine|\.local/lib/python[0-9.]+|"
     r"\.config/Code/|\.mozilla|\.thunderbird|\.pki/nssdb)/""")
 
+# Filenames that are credential files by name alone.
 # 2. NEVER print fragments of key material: only extract identifier-shaped keys
 #    from text config files, and never from PEM/binary/cert files.
 BINARYISH = re.compile(r"\.(?:pem|pfx|p12|jks|keystore|der|crt|cer|key)$", re.I)
@@ -920,6 +953,8 @@ def _suggest(path):
     parent = re.sub(r"[^a-z0-9._-]+", "-", parent).strip("-") or "misc"
     if base in (".netrc", "_netrc"):
         return "heroku.com/mbadriah", "login"
+# Credentials the machine itself needs where they are. A record of these belongs
+# in the vault; the live file stays put, and the guard keeps agents out of it.
     if base == ".npmrc":
         return "npmjs.com/mbadriah", "token"
     if base == ".pypirc":

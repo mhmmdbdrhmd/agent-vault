@@ -67,34 +67,61 @@ python3 -c 'import cryptography' 2>/dev/null \
 say "cryptography present"
 
 KEYRING=no
-if python3 -c 'import secretstorage' 2>/dev/null; then
-  if python3 - <<'PY' 2>/dev/null
+KEYRING_KIND=none
+case "$(uname -s)" in
+  Darwin)
+    KEYRING_KIND="macOS login keychain"
+    # `security list-keychains` is read-only and never prompts.
+    if [ -x /usr/bin/security ] && /usr/bin/security list-keychains >/dev/null 2>&1
+    then KEYRING=yes; fi
+    ;;
+  *)
+    KEYRING_KIND="Secret Service (gnome-keyring, kwallet, keepassxc)"
+    if python3 -c 'import secretstorage' 2>/dev/null; then
+      if python3 - <<'PY' 2>/dev/null
 import secretstorage
 c = secretstorage.dbus_init()
 secretstorage.get_default_collection(c)
 PY
-  then KEYRING=yes; fi
-fi
+      then KEYRING=yes; fi
+    fi
+    ;;
+esac
 
 if [ "$KEYRING" = yes ]; then
-  say "system keyring reachable — the master key will not be a file on disk"
+  say "keyring reachable: $KEYRING_KIND — the master key will not be a file on disk"
 else
-  warn "NO SYSTEM KEYRING REACHABLE."
+  warn "NO SYSTEM KEYRING REACHABLE ($KEYRING_KIND)."
   warn "vlt keeps its master key in the keyring precisely so that it is not a"
   warn "readable file. Without one, the key must live at $SHARE/.master.key,"
   warn "mode 0400 — a weaker model: anything running as you can read it."
   warn "vlt will refuse to start until you accept that explicitly:"
   warn "    export VLT_ALLOW_FILE_KEY=1"
-  warn "On Linux install gnome-keyring or another Secret Service provider."
-  warn "On macOS/BSD there is no supported keyring backend yet — see README."
+  case "$(uname -s)" in
+    Darwin) warn "On macOS /usr/bin/security should already be present; check" \
+                 "that a login keychain exists (Keychain Access.app)." ;;
+    *)      warn "On Linux install gnome-keyring or another Secret Service" \
+                 "provider, plus python3-secretstorage." ;;
+  esac
 fi
 
-for c in zenity gnome-terminal xterm; do
-  command -v "$c" >/dev/null && say "found $c" && break
-done
-command -v zenity >/dev/null || command -v gnome-terminal >/dev/null || \
-  warn "no zenity or gnome-terminal: 'vlt request' cannot open a window for you,
+# Whatever opens the separate window that a person types credentials into.
+case "$(uname -s)" in
+  Darwin)
+    command -v osascript >/dev/null \
+      && say "found osascript (Terminal.app + confirmation dialogs)" \
+      || warn "no osascript: 'vlt request' cannot open a window, and human-only
+      commands will need a real terminal instead of a dialog"
+    ;;
+  *)
+    for c in zenity gnome-terminal xterm; do
+      command -v "$c" >/dev/null && say "found $c" && break
+    done
+    command -v zenity >/dev/null || command -v gnome-terminal >/dev/null || \
+      warn "no zenity or gnome-terminal: 'vlt request' cannot open a window for you,
       and human-only commands will need a real terminal instead of a dialog"
+    ;;
+esac
 
 # ------------------------------------------------------------------ install
 head_ "Installing the CLI"

@@ -96,12 +96,32 @@ the bytes". Not implemented here.
 
 ### The master key
 
-Held in the OS keyring (Secret Service / gnome-keyring), so it is not a readable
-file. It unlocks with your login session, which is why the tool never asks for a
-passphrase — a deliberate trade: convenience over resistance to an attacker who
-already has your logged-in session.
+Held in the OS keyring, so it is not a readable file. It unlocks with your login
+session, which is why the tool never asks for a passphrase — a deliberate trade:
+convenience over resistance to an attacker who already has your logged-in
+session.
 
-If no keyring is available, `vlt` **refuses to start** rather than silently
+Two backends, chosen by platform:
+
+| | Linux | macOS |
+|---|---|---|
+| Store | Secret Service (gnome-keyring, kwallet, keepassxc) over D-Bus | login keychain via `/usr/bin/security` |
+| Stored as | the 32 raw bytes | base64 of the same bytes — the keychain CLI carries text, not bytes |
+| Access | any process running as you, no prompt | the same, via `-A` on the keychain item |
+
+`-A` is what "no passphrase on every use" costs on macOS: the item is readable
+by any process running as you, without a per-use prompt. That is the same trust
+model gnome-keyring gives on Linux, stated rather than assumed. Removing it
+would make the keychain prompt on every `vlt` call, which is the behaviour this
+tool exists to avoid.
+
+**One exposure is specific to macOS.** `security` takes the password as a
+command-line argument, so the master key is visible to `ps` for the length of
+that one call. It happens on `vlt init` and `vlt identity import` — never on a
+read — and the keychain CLI offers no way to pass a secret on stdin without a
+terminal to prompt at. On Linux the key never touches argv.
+
+If neither is available, `vlt` **refuses to start** rather than silently
 writing the key to disk. `VLT_ALLOW_FILE_KEY=1` accepts the weaker model
 explicitly, and `vlt doctor` reports it as a problem for as long as it is in use.
 
