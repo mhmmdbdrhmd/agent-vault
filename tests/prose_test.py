@@ -151,6 +151,47 @@ R.check("tilde expanded before resolving", "/~/" not in why, why.split("\n")[0])
 R.check("tilde path resolves to the real home", HOME + "/.ssh/id_" in why,
         why.split("\n")[0])
 
+# ------------------------------------- naming a human-only command is not running it
+# The path walk learned this first; the verb checks had not. Writing about
+# `vlt identity import` in a heredoc comment, or echoing advice about
+# `vlt identity export`, is prose. Only a segment that would EXECUTE the text
+# counts.
+VERB_PROSE = [
+    ("human-only command in a heredoc comment",
+     "python3 - <<'PY'\n# vlt identity import restores the master key\n"
+     "print(1)\nPY"),
+    ("human-only command echoed as advice",
+     "echo 'run vlt identity export before you wipe the disk'"),
+    ("human-only command in a commit message",
+     "git commit -m 'document vlt keyring prune in the README'"),
+    ("keyring named in prose",
+     "echo 'the master key lives in gnome-keyring, never on disk'"),
+    ("keyring named in a heredoc comment",
+     "cat <<'EOF' > /tmp/notes.md\n# secret-tool is not used any more\nEOF"),
+]
+for label, cmd in VERB_PROSE:
+    got, why = ask(cmd)
+    R.check("verb prose allowed: %s" % label, got == "ALLOW", why.split("\n")[0])
+
+# Quoted text that something in the segment will RUN is not prose.
+VERB_OPS = [
+    ("the command itself", "vlt identity export /tmp/k"),
+    ("wrapped in sh -c", "sh -c 'vlt identity export /tmp/k'"),
+    ("wrapped in an interpreter",
+     "python3 -c 'import secretstorage; print(1)'"),
+    ("piped through xargs", "echo x | xargs -I{} vlt get github.com/me"),
+    ("keyring tool invoked",
+     "secret-tool lookup application vlt purpose master-identity"),
+]
+for label, cmd in VERB_OPS:
+    got, why = ask(cmd)
+    R.check("still blocked: %s" % label, got == "DENY", why.split("\n")[0])
+
+got, why = ask("vlt identity export /tmp/k")
+R.check("verb denial says which segment matched", "matched in:" in why,
+        why.split("\n")[0])
+
+
 import shutil                                            # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)
 sys.exit(R.done())

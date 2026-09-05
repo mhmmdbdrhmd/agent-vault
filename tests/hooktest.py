@@ -49,9 +49,17 @@ CASES = [
  ("Edit", {"file_path": H + "/projects/webapp/app.py"}, "ALLOW"),
  ("Bash", {"command": "cat ~/.ssh/id_ed25519"}, "DENY"),
  ("Bash", {"command": "cat " + H + "/projects/webapp/credentials"}, "DENY"),
- ("Bash", {"command": "vlt get github.com/biss token"}, "DENY"),
+ ("Bash", {"command": "vlt get github.com/example token"}, "DENY"),
  ("Bash", {"command": "vlt show test/dummy"}, "DENY"),
  ("Bash", {"command": "secret-tool lookup application vlt"}, "DENY"),
+ # The macOS login keychain is the same asset as the Secret Service. These run
+ # on every platform: the guard is regex over command text, so a Linux run
+ # proves the rule without needing a Mac.
+ ("Bash", {"command": "security find-generic-password -s vlt -w"}, "DENY"),
+ ("Bash", {"command": "security -q add-generic-password -a x -s y -w z"},
+  "DENY"),
+ ("Bash", {"command": "security dump-keychain -d"}, "DENY"),
+ ("Read", {"file_path": H + "/Library/Keychains/login.keychain-db"}, "DENY"),
  ("Bash", {"command": "python3 -c 'import secretstorage'"}, "DENY"),
  ("Bash", {"command": "grep -r 'BEGIN RSA PRIVATE KEY' " + H}, "DENY"),
  ("Bash", {"command": "grep -rn 'ghp_' ~/github"}, "DENY"),
@@ -61,7 +69,7 @@ CASES = [
  ("Bash", {"command": "vlt list"}, "ALLOW"),
  ("Bash", {"command": "vlt peek test/dummy"}, "ALLOW"),
  ("Bash", {"command": "vlt exec test/dummy -- gh auth status"}, "ALLOW"),
- ("Bash", {"command": "vlt request stripe.com/biss --fields key"}, "ALLOW"),
+ ("Bash", {"command": "vlt request stripe.com/example --fields key"}, "ALLOW"),
  ("Bash", {"command": "ls -la " + H + "/projects"}, "ALLOW"),
  ("Bash", {"command": "grep -rn 'password' ~/github/mywebsite"}, "ALLOW"),
  ("Grep", {"pattern": "ghp_[A-Za-z0-9]+", "path": H}, "DENY"),

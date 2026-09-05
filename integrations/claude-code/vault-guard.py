@@ -74,12 +74,17 @@ LEGACY_RE = re.compile(
 # Machine-operational credentials: still denied to agents, but never migrated away.
 MACHINE_OPERATIONAL = re.compile(
     r"(?:\.cert/nm-openvpn/|\.config/kdeconnect/|\.mitmproxy/|"
+    r"Library/Keychains/|"
     r"\.claude/\.credentials\.json)")
 
 # Reading the keyring directly would bypass the vault entirely.
 KEYRING_RE = re.compile(
-    r"\b(?:secret-tool|secretstorage|SecretService|gnome-keyring|"
-    r"vlt-master-identity|python[0-9.]*\s+-c[^\n]*keyring)\b", re.IGNORECASE)
+    r"\b(?:secret-tool|secretstorage|SecretService|gnome-keyring|kwalletcli|"
+    r"vlt-master-identity|python[0-9.]*\s+-c[^\n]*keyring"
+    # macOS: the login keychain is the same asset by another name.
+    r"|security\s+(?:-\w+\s+)*(?:find|add|delete)-(?:generic|internet)-password"
+    r"|dump-keychain|login\.keychain(?:-db)?"
+    r")\b", re.IGNORECASE)
 
 # vlt subcommands that reveal values.
 VLT_DENIED_RE = re.compile(
@@ -444,21 +449,47 @@ def _describe(t, resolved, exists, seg):
             % (t, where, resolved))
 
 
-def check_bash(cmd):
-    flat = OBFUSC_RE.sub("", cmd)      # quoting cannot hide a verb any more
+# A quoted span containing whitespace is prose: a commit message, an echo, a
+# --body. A quoted span WITHOUT whitespace is how verbs get obfuscated —
+# `c""at`, `'c'at` — so those are left alone for OBFUSC_RE to collapse.
+PROSE_SPAN_RE = re.compile(r"'[^'\n]*\s[^'\n]*'"
+                           r'|"[^"\n]*\s[^"\n]*"')
 
-    for probe in (cmd, flat):
-        if VLT_DENIED_RE.search(probe):
-            return ("BLOCKED: that `vlt` subcommand reveals secret values or "
-                    "changes what is masked, and is human-only.\n\n%s" % USE_VLT)
-        if VLT_EXEC_DUMP_RE.search(probe):
-            return ("BLOCKED: that would inject the secret and then print the "
-                    "environment it was injected into, putting the value in your "
-                    "output. Run the program that consumes the credential "
-                    "instead.\n\n%s" % USE_VLT)
-        if KEYRING_RE.search(probe):
-            return ("BLOCKED: that command reaches the system keyring, where the "
-                    "vault master key lives.\n\n%s" % USE_VLT)
+# Constructs that hand a quoted string to something which will run it. When one
+# is present, quoted text is no longer prose and is checked in full.
+SHELL_EXEC_RE = re.compile(
+    r"\b(?:sh|bash|zsh|dash|ksh|ash|busybox)\b[^\n]*?\s-c\b"
+    r"|\benv\b[^\n]*?\s(?:sh|bash|zsh)\b"
+    r"|\beval\b|\bxargs\b|\bsudo\b|\bnohup\b|\bwatch\b"
+    r"|\bssh\b|\bdocker\b[^\n]*\bexec\b|\bsu\b\s")
+
+
+def _verb_probes(seg):
+    """Texts to match verb patterns against, prose excluded where it is prose."""
+    flat = OBFUSC_RE.sub("", seg)
+    if SHELL_EXEC_RE.search(flat) or INTERP_RE.search(flat):
+        # `python3 -c '...'` and `sh -c '...'` both run what is inside the
+        # quotes, so this segment has no prose to protect.
+        return (seg, flat)
+    bare = PROSE_SPAN_RE.sub(" ", seg)
+    return (bare, OBFUSC_RE.sub("", bare))
+
+
+def _snippet(seg, width=70):
+    seg = " ".join(seg.split())
+    return seg if len(seg) <= width else seg[:width - 1] + "\u2026"
+
+
+def check_bash(cmd):
+    # Heredoc bodies and comments are data, not commands — drop them before any
+    # verb match, exactly as the path walk already does.
+    stripped = _strip_comments(_strip_heredocs(cmd))
+    flat = OBFUSC_RE.sub("", stripped)
+
+    # These two match a pipeline or secret-shaped content rather than a verb, so
+    # they see the whole command: splitting on `|` would hide `... | sh`, and a
+    # hunted VALUE is normally quoted on purpose.
+    for probe in (stripped, flat):
         if VALUE_HUNT_RE.search(probe):
             return ("BLOCKED: that command searches for credential VALUES.\n\n%s"
                     % USE_VLT)
@@ -467,6 +498,26 @@ def check_bash(cmd):
                     "it to a shell. The guard cannot see what it would run, so it "
                     "cannot allow it. Run the command directly instead.\n\n%s"
                     % USE_VLT)
+
+    # Verb-shaped checks, per segment, ignoring prose inside quotes.
+    for seg in _segments(cmd):
+        probes = _verb_probes(seg)
+        for probe in probes:
+            if VLT_DENIED_RE.search(probe):
+                return ("BLOCKED: that `vlt` subcommand reveals secret values or "
+                        "changes what is masked, and is human-only.\n"
+                        "         (matched in: %s)\n\n%s"
+                        % (_snippet(seg), USE_VLT))
+            if VLT_EXEC_DUMP_RE.search(probe):
+                return ("BLOCKED: that would inject the secret and then print the "
+                        "environment it was injected into, putting the value in "
+                        "your output. Run the program that consumes the "
+                        "credential instead.\n\n%s" % USE_VLT)
+            if KEYRING_RE.search(probe):
+                return ("BLOCKED: that command reaches the system keyring, where "
+                        "the vault master key lives.\n"
+                        "         (matched in: %s)\n\n%s"
+                        % (_snippet(seg), USE_VLT))
 
     # Only against the original text: `flat` has had its quotes removed, which
     # would make every string literal look like a runtime-built path.
