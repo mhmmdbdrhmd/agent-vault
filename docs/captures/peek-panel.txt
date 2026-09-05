@@ -1,0 +1,12 @@
+name     : vps/alpha/panel
+type     : service
+account  : 
+tags     : 
+env_map  : {}
+hidden   : token, url
+------------------------------------------------------------
+username:    admin   [5 chars, base62]
+token:       EXAM••••••••••••   [33 chars, base62]
+url:         http••••••••••••   [34 chars, ascii]
+------------------------------------------------------------
+structure only. To use it:  vlt exec vps/alpha/panel -- <command>

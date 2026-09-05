@@ -1,0 +1,11 @@
+name     : github.com/example
+type     : token
+account  : 
+tags     : 
+env_map  : {}
+hidden   : token
+------------------------------------------------------------
+username:    exampleuser   [11 chars, base62]
+token:       ghp_••••••••••••   [39 chars, base64url]
+------------------------------------------------------------
+structure only. To use it:  vlt exec github.com/example -- <command>

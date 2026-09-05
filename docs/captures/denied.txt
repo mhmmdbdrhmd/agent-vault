@@ -1,0 +1,5 @@
+vlt: `vlt get` reveals secret values and is not available to agents.
+     Use instead:  vlt list | vlt peek <name> | vlt exec <name> -- CMD
+                   vlt file <name> <field> --out PATH
+                   vlt render --secret <name> --out FILE
+     If the secret does not exist yet:  vlt request <name> --fields ...

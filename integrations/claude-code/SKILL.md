@@ -52,8 +52,8 @@ fields are populated, the env-var mapping and tags.
 
 ### Inspect structure (not value)
 ```bash
-vlt peek github.com/biss
-vlt peek github.com/biss --chars 6     # more leading characters
+vlt peek github.com/example
+vlt peek github.com/example --chars 6     # more leading characters
 ```
 **Each record decides which of its own fields are masked.** The user chooses that set;
 it is not a fixed list, and it is not yours to change. `peek` prints the set, then shows
@@ -62,7 +62,7 @@ masked fields as leading characters + length + charset, and unmasked fields in f
 ```
 hidden   : key, password, secret, token
 token:       ghp_••••••••••••   [40 chars, base64url]
-username:    mbadriah   [8 chars, base62]
+username:    exampleuser[8 chars, base62]
 ```
 
 Use this to verify a credential has the shape you expect — that a GitHub token starts
@@ -75,9 +75,9 @@ confirm format; do not copy values out of it into files, commits, logs or messag
 
 **1. Run a command with it (best — the value never touches the filesystem):**
 ```bash
-vlt exec github.com/biss -- gh repo list
-vlt exec vps/frankfurt -- ssh -p "$SSH_PORT" "$SSH_USERNAME@$SSH_HOST"
-vlt exec openai.com/biss,github.com/biss -- python train.py    # several at once
+vlt exec github.com/example -- gh repo list
+vlt exec vps/beta -- ssh -p "$SSH_PORT" "$SSH_USERNAME@$SSH_HOST"
+vlt exec openai.com/example,github.com/example -- python train.py    # several at once
 ```
 Fields are injected as environment variables per the record's `env_map` (see it with
 `vlt peek`). The variables exist only inside that child process.
@@ -98,13 +98,13 @@ an argument, that is the user's call to make with `--allow-interpolation`, not y
 
 **2. Write one field straight to a file (the `cat file >` case):**
 ```bash
-vlt file ssh/vps-frankfurt key --out ~/.ssh/tmp_deploy --mode 0600
+vlt file ssh/vps-beta key --out ~/.ssh/tmp_deploy --mode 0600
 vlt file cert/client key --out /etc/app/client.key --mode 0400
 ```
 
 **3. Render a whole config or `.env`:**
 ```bash
-vlt render --secret openai.com/biss --out ./.env
+vlt render --secret openai.com/example --out ./.env
 vlt render --secret db/prod --template pg.conf.tpl --out ./pg.conf
 ```
 Templates live in `~/.local/share/vlt/templates/` and use `{{VAR}}` or `${VAR}`
@@ -116,10 +116,10 @@ program to consume, not for you. If you need to check your work, use `vlt peek`.
 
 ### Request a missing credential
 ```bash
-vlt request stripe.com/biss --type apikey --fields key \
+vlt request stripe.com/example --type apikey --fields key \
     --reason "deploy script needs the Stripe live key"
 
-vlt request vps/frankfurt --type ssh --fields host,port,username,password \
+vlt request vps/beta --type ssh --fields host,port,username,password \
     --reason "connecting to the Frankfurt VPS"
 ```
 A terminal window opens on the user's desktop with a notification. They type the values
@@ -132,7 +132,7 @@ if the window cannot open, tell them to run `VLT_HUMAN=1 vlt add <name>` themsel
 Every record — whatever the credential — has the same shape:
 
 - **name**: `<provider>/<account>[/<purpose>]`, lowercase.
-  `github.com/biss`, `openai.com/personal`, `ssh/vps-frankfurt`, `demmler/bodas-service`
+  `github.com/example`, `openai.com/personal`, `ssh/vps-beta`, `internal/build-server`
 - **type**: `login token apikey oauth ssh database cert vpn smtp service`
 - **fields**: only these — `username password token key secret host port url path
   region account_id`. Anything else goes in `extra`.
@@ -171,7 +171,7 @@ their call, never yours, and never something to suggest as a way past a block.
 
 ```bash
 vlt audit --tail 40            # who read what, when
-vlt audit --name github.com/biss
+vlt audit --name github.com/example
 vlt scan ~                     # inventory credential files not yet in the vault
 vlt doctor                     # health check
 ```

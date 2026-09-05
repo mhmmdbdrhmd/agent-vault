@@ -1,0 +1,7 @@
+NAME                               TYPE      FIELDS                       TAGS
+cloudflare/example                 token     token                        
+github.com/example                 token     username,token               
+openai.com/example                 apikey    key                          
+vps/alpha/panel                    service   username,token,url           
+vps/alpha/ssh                      ssh       username,password,host,port  
+vps/beta/ssh                       ssh       username,password,host,port  

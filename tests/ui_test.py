@@ -14,11 +14,9 @@ sys.path.insert(0, TH.REPO)
 import os
 import pty
 import select
-import subprocess
 import sys
 import time
 
-import vltlib as V          # noqa: E402
 import vltui               # noqa: E402
 
 fails = []
@@ -36,11 +34,11 @@ def check(label, ok, detail=""):
 # vault — never rely on whatever happens to be in the caller's real one.
 TH.init_vault()
 for _name, _fields in [
-    ("vps/senko/3x-ui", [("username", "exampleuser"),
+    ("vps/alpha/3x-ui", [("username", "exampleuser"),
                          ("password", "EXAMPLE-password-0000")]),
-    ("vps/senko/ssh", [("host", "198.51.100.10"), ("port", "22"),
+    ("vps/alpha/ssh", [("host", "198.51.100.10"), ("port", "22"),
                        ("username", "exampleuser")]),
-    ("vps/frankfurt/3x-ui", [("username", "exampleuser"),
+    ("vps/beta/3x-ui", [("username", "exampleuser"),
                              ("password", "EXAMPLE-password-1111")]),
     ("cloudflare/example", [("token", "EXAMPLE-token-2222222222")]),
 ]:
@@ -48,34 +46,34 @@ for _name, _fields in [
         TH.vlt(["set", _name, _f, _v])
 
 # ------------------------------------------------------------ tree structure
-names = ["vps/senko/3x-ui", "vps/senko/ssh", "vps/frankfurt/3x-ui",
-         "cloudflare/biss", "test/dummy"]
+names = ["vps/alpha/3x-ui", "vps/alpha/ssh", "vps/beta/3x-ui",
+         "cloudflare/example", "test/dummy"]
 root = vltui.build_tree(names)
 flat = vltui.flatten(root)
 paths = [n.path for n in flat]
 
-check("branches created", "vps" in paths and "vps/senko" in paths)
+check("branches created", "vps" in paths and "vps/alpha" in paths)
 check("leaves marked as records",
       all(n.is_record for n in flat if n.path in names))
 check("branches not marked as records",
-      not any(n.is_record for n in flat if n.path in ("vps", "vps/senko")))
+      not any(n.is_record for n in flat if n.path in ("vps", "vps/alpha")))
 check("depth is segment count",
       all(n.depth == n.path.count("/") for n in flat))
 check("every record reachable", all(p in paths for p in names))
 
 # collapsing hides descendants
 for n in flat:
-    if n.path == "vps/senko":
+    if n.path == "vps/alpha":
         n.expanded = False
 collapsed = [x.path for x in vltui.flatten(root)]
-check("collapse hides children", "vps/senko/3x-ui" not in collapsed)
-check("collapse keeps the branch", "vps/senko" in collapsed)
-check("collapse leaves siblings", "vps/frankfurt/3x-ui" in collapsed)
+check("collapse hides children", "vps/alpha/3x-ui" not in collapsed)
+check("collapse keeps the branch", "vps/alpha" in collapsed)
+check("collapse leaves siblings", "vps/beta/3x-ui" in collapsed)
 
 # search
-hits = [n.path for n in vltui.flatten(root, query="senko")]
-check("search finds matches", "vps/senko" in hits)
-check("search excludes non-matches", "cloudflare/biss" not in hits)
+hits = [n.path for n in vltui.flatten(root, query="alpha")]
+check("search finds matches", "vps/alpha" in hits)
+check("search excludes non-matches", "cloudflare/example" not in hits)
 
 # ------------------------------------------------------- record construction
 form = vltui.Form.__new__(vltui.Form)

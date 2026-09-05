@@ -1,0 +1,22 @@
+ vlt — credential vault
+
+▾ cloudflare                   │ vps/alpha/panel
+  ● example                    │ type service    account -
+▾ github.com                   │
+  ● example                    │
+▾ openai.com                   │ FIELD         VALUE                          STATE
+  ● example                    │ username      admin                          shown
+▾ vps                          │ token         EXAM••••••••••••               masked
+  ▾ alpha                      │ url           http••••••••••••               masked
+    ● panel                    │
+    ● ssh                      │ SPACE masks/unmasks the selected field
+  ▾ beta                       │ v reveals it on screen   e edits this record
+    ● ssh                      │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+
+↑↓ move  TAB pane  SPACE mask  e edit  a add  q quit

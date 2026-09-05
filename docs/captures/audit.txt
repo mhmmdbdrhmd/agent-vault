@@ -1,0 +1,6 @@
+2026-09-05T15:36:32Z  3353c681 human  set            github.com/example           field=token
+2026-09-05T15:36:32Z  3353c681 human  set            openai.com/example           field=key
+2026-09-05T15:36:32Z  3353c681 human  set            cloudflare/example           field=token
+2026-09-05T15:36:32Z  3353c681 agent  list           *                            
+2026-09-05T15:36:32Z  3353c681 agent  peek           github.com/example           
+2026-09-05T15:36:32Z  3353c681 agent  peek           vps/alpha/panel              
