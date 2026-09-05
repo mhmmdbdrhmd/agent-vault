@@ -34,6 +34,15 @@ if os.environ.get("VLT_KEYRING_TEST") != "1":
 # it needs vltlib re-read with the temp VLT_HOME already in place so the label
 # is scoped away from the user's own vault.
 os.environ.pop("VLT_NO_KEYRING", None)
+
+# The harness points HOME at a fixture tree so the guard suites cannot be
+# answered by whoever is running them. This suite is the exception: the system
+# keyring lives in the real home, and on macOS `security` resolves the login
+# keychain through $HOME. Pointed at a temp directory it does not fail, it
+# blocks — which cost one CI run 4 hours 44 minutes before it was killed.
+# Isolation here comes from VLT_HOME, which scopes the entry's label.
+os.environ["HOME"] = TH.REAL_HOME
+
 import vltlib as V                                      # noqa: E402
 
 backend = V.keyring_backend()

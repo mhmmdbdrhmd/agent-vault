@@ -40,7 +40,15 @@ os.environ.pop("WAYLAND_DISPLAY", None)
 # real home makes every such assertion depend on what the person running the
 # tests happens to own — which is exactly how a hole in the bash guard reached
 # CI reported as a pass. Build the filesystem the tests describe instead.
+# Kept so the one suite that must reach the real system keyring can put it
+# back. Everything else wants the fixture.
+REAL_HOME = os.path.expanduser("~")
 FAKE_HOME = os.path.join(VLT_HOME, "home")
+# The CONTENT is never read by any assertion — only the paths matter. So it is
+# deliberately not key-shaped: a PEM header here, however fake, makes every
+# secret scanner in the pipeline report this repository as leaking a private
+# key, and a scanner whose findings are all known-and-ignored is a scanner
+# nobody reads.
 _TREE = {
     ".ssh/id_rsa": "fixture: a file at this path, not key material\n",
     ".ssh/id_ed25519": "fixture: a file at this path, not key material\n",

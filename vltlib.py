@@ -173,9 +173,25 @@ def _use_keyring():
 
 # --------------------------------------------------------- macOS login keychain
 
+MAC_TIMEOUT = 20        # seconds; `security` can sit waiting on a GUI prompt
+
+
 def _mac(args, check=False):
+    """Run `security`, and never wait on it for ever.
+
+    Some subcommands prompt — for an unlock, or for permission — and with no
+    desktop to answer, the call blocks indefinitely. A credential tool that can
+    hang is a credential tool that will, in the one script nobody is watching.
+    """
     import subprocess
-    r = subprocess.run([SECURITY] + args, capture_output=True, text=True)
+    try:
+        r = subprocess.run([SECURITY] + args, capture_output=True, text=True,
+                           timeout=MAC_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            "`security %s` did not return within %ds — the keychain is "
+            "probably waiting for a prompt that nothing can answer."
+            % (args[0], MAC_TIMEOUT))
     if check and r.returncode != 0:
         raise RuntimeError(r.stderr.strip() or
                            "security %s failed (%d)" % (args[0], r.returncode))
@@ -223,7 +239,11 @@ def _mac_items():
 
     `dump-keychain` without -d prints attributes only, and does not prompt.
     """
-    r = _mac(["dump-keychain"])
+    try:
+        r = _mac(["dump-keychain"])
+    except RuntimeError:
+        # Listing is a convenience; a prompt here must not take the caller down.
+        return []
     if r.returncode != 0:
         return []
     out, svce, acct = [], None, None
