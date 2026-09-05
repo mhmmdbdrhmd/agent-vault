@@ -404,6 +404,14 @@ def _resolve(t, base):
     return os.path.normpath(cand)
 
 
+# Directories whose whole purpose is holding credentials. A credential-shaped
+# bare name resolved inside one is an operation even before the file exists —
+# writing a key there is as much a concern as reading one.
+CRED_DIR_RE = re.compile(
+    r"(?:^|/)(?:\.ssh|\.gnupg|\.aws|\.docker|\.kube|\.config/gh"
+    r"|\.local/share/vlt|Library/Keychains)/?$")
+
+
 def _cred_match(t, base):
     """Why `t` counts as naming a credential file, or None.
 
@@ -422,12 +430,16 @@ def _cred_match(t, base):
             return (cand, os.path.exists(cand))
         return None
 
-    # A bare word. Only a real file on disk makes this an operation rather
-    # than prose — this is what keeps `cd ~/.ssh && cat id_rsa` blocked.
+    # A bare word. Two things can make it an operation rather than prose: the
+    # file is really there, or the directory it resolves in is one that exists
+    # to hold credentials. Prose satisfies neither — it names no real file, and
+    # it never `cd`s into ~/.ssh first.
     if not CRED_BASENAME_RE.match(os.path.basename(t.rstrip("/"))):
         return None
     if os.path.exists(cand):
         return (cand, True)
+    if CRED_DIR_RE.search(os.path.dirname(cand)):
+        return (cand, False)
     return None
 
 
@@ -442,6 +454,15 @@ def _describe(t, resolved, exists, seg):
     if exists:
         return ("BLOCKED: %s is a credential file, and this command names it%s"
                 % (resolved, where))
+    # Only a BARE name leans on the directory. An explicit path is refused on
+    # the pattern alone, and saying otherwise would misdescribe why.
+    parent = os.path.dirname(resolved)
+    if not _looks_like_path(t) and CRED_DIR_RE.search(parent):
+        return ("BLOCKED: `%s` resolves to %s, inside a directory that exists "
+                "to hold credentials%s\n"
+                "         (no file is there right now — the directory is what "
+                "makes this an operation, not prose)"
+                % (t, resolved, where))
     return ("BLOCKED: this command contains the token `%s`, which matches a "
             "credential-file pattern%s\n"
             "         (it would resolve to %s — not checked for existence, and "

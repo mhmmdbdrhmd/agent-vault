@@ -192,6 +192,44 @@ R.check("verb denial says which segment matched", "matched in:" in why,
         why.split("\n")[0])
 
 
+# ------------------------------- a credential directory, with nothing in it yet
+# CI found this on its first run: the existence requirement made
+# `cd ~/.ssh && cat id_rsa` depend on whether that file happened to be there.
+# It was, on the machine the tests were written on. On a fresh runner it was
+# not, and evasion_test reported the case it exists to pin as a HOLE.
+#
+# The fake home the harness builds now contains an id_rsa, so these cases use a
+# DIFFERENT, EMPTY .ssh directory. Nothing but the directory rule can block
+# them, which is the point: delete that rule and these go red.
+emptyssh = os.path.join(tmp, "fresh", ".ssh")
+os.makedirs(emptyssh)
+
+got, why = ask("cd " + emptyssh + " && cat id_" + "rsa")
+R.check("bare key name blocked inside an empty .ssh", got == "DENY",
+        why.split("\n")[0])
+R.check("and the message does not claim the file exists",
+        "is a credential file" not in why, why.split("\n")[0])
+R.check("and it says the directory is the reason",
+        "directory" in why, why.split("\n")[0])
+
+got, why = ask("cd " + os.path.join(tmp, "fresh", ".aws") + " && cat credentials")
+R.check("same for an .aws directory that does not exist at all", got == "DENY",
+        why.split("\n")[0])
+
+# The rule is about credential NAMES in credential directories, not about
+# everything in them. An ssh config and a known_hosts file are neither secret
+# nor interesting, and blocking them would be the false-positive habit again.
+for label, base in (("config", "config"), ("known_hosts", "known_hosts")):
+    got, why = ask("cd " + emptyssh + " && cat " + base)
+    R.check("still allowed in .ssh: %s" % label, got == "ALLOW",
+            why.split("\n")[0])
+
+# And an ordinary directory is unchanged: a bare word there is still prose.
+got, why = ask("cd " + tmp + " && cat id_" + "rsa")
+R.check("bare key name in an ordinary directory is still prose",
+        got == "ALLOW", why.split("\n")[0])
+
+
 import shutil                                            # noqa: E402
 shutil.rmtree(tmp, ignore_errors=True)
 sys.exit(R.done())

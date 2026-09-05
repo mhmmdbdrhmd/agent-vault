@@ -1,6 +1,6 @@
 <h1 align="center">agent-vault</h1>
 <p align="center"><i>Let coding agents use your credentials without ever seeing them</i></p>
-<p align="center"><a href="https://github.com/mhmmdbdrhmd/agent-vault/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/agent-vault/actions/workflows/tests.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-6E7681?style=flat-square"> <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white"> <img alt="crypto" src="https://img.shields.io/badge/AES--256--GCM-per%20record-E7352C?style=flat-square"> <img alt="tests" src="https://img.shields.io/badge/tests-340%20assertions-58A6FF?style=flat-square"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/agent-vault/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/agent-vault/actions/workflows/tests.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-6E7681?style=flat-square"> <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white"> <img alt="crypto" src="https://img.shields.io/badge/AES--256--GCM-per%20record-E7352C?style=flat-square"> <img alt="tests" src="https://img.shields.io/badge/tests-347%20assertions-58A6FF?style=flat-square"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"></p>
 
 > An agent can find out that a GitHub token exists, confirm it starts `ghp_` and
 > is 40 characters, and run `gh` with it in the environment — **without the value
@@ -358,8 +358,12 @@ work around patterns, which is the exact behaviour the guard exists to suppress,
 and they make every denial less believable — a message asserting something it
 never checked is worse than no message. So:
 
-- a **bare word** counts only if it resolves to a file that exists, which is
-  what keeps `cd ~/.ssh && cat id_rsa` blocked, since that one does;
+- a **bare word** counts if it resolves to a file that exists, **or** if it
+  resolves inside a directory whose purpose is credentials — `~/.ssh`,
+  `~/.gnupg`, `~/.aws`, `~/Library/Keychains`. Existence alone was not enough:
+  it made `cd ~/.ssh && cat id_rsa` depend on whether that file was there, which
+  CI caught immediately. Prose satisfies neither test, because prose names no
+  real file and never `cd`s anywhere;
 - a **quoted path** counts only if something in the same shell segment actually
   reads files, so a commit message mentioning `~/.netrc` is prose while
   `cat "~/.netrc"` is not;
@@ -367,7 +371,7 @@ never checked is worse than no message. So:
 - a denial states **which token matched and in which segment**, and calls
   something a credential file only when existence was actually checked.
 
-[`tests/prose_test.py`](tests/prose_test.py) pins both directions — 40
+[`tests/prose_test.py`](tests/prose_test.py) pins both directions — 47
 assertions, roughly half "this English must be allowed" and half "this operation
 must still die".
 
@@ -423,7 +427,7 @@ python3 tests/run_all.py --fast     # skip the pty-driven UI suites
 python3 tests/run_all.py --count    # assertions per suite
 ```
 
-**340 assertions across 14 suites**, all passing, every one of them against a
+**347 assertions across 14 suites**, all passing, every one of them against a
 throwaway vault in a temp directory — never your real one, and never your
 keyring. That isolation is not tidiness: an earlier version ran against the
 developer's live vault, and a test that unmasked a field printed a production
@@ -458,7 +462,7 @@ The four worth knowing about:
 Being straight about what has been checked and what has not.
 
 **Verified — the suites, on this machine.** `python3 tests/run_all.py` runs 14
-suites and 340 assertions on Python 3.10 / Linux, and all pass; `--count`
+suites and 347 assertions, and all pass; `--count`
 reproduces that number per suite. The repository also passes from a **bare
 clone**, and `install.sh` succeeds from that clone into a sandbox prefix.
 
@@ -480,19 +484,35 @@ is fixed, and `scan_test.py` now covers it. The absence of a linter and the
 absence of any test touching that command are now statements about the past
 only.
 
-**NOT verified — CI has never run.** The workflow in `.github/workflows/` was
-written against a repository that has not been pushed yet. Until those jobs go
-green the badge at the top is decoration, and the two keyring jobs in particular
-are untested plumbing.
+**Verified — the macOS keychain, on Apple hardware.** The `macos-latest` job
+writes the master key to a real login keychain, reads it back, lists it,
+overwrites it and deletes it. The Linux job does the same against gnome-keyring
+under `dbus-run-session`. Both pass. That is the claim in §2 settled by a
+machine rather than by reasoning.
 
-**NOT verified — macOS, on a Mac.** The keychain backend is implemented and
-covered by `keyring_test.py`, and a `macos-latest` CI job exists to run it. **No
-part of it has executed on Apple hardware.** Until that job passes, treat macOS
-as written-but-unproven. The `vlt request` path there — driving Terminal.app
-through `osascript` — has no automated coverage at all, on any platform.
+**Verified — that CI was worth wiring up, on its first run.** Every `suites`
+job failed, on both operating systems and all three Python versions, on one
+shared assertion:
 
-**NOT verified — Python versions other than 3.10.** The CI matrix names 3.9,
-3.11 and 3.13. None of them has run.
+```
+HOLE  cd then relative   ALLOW   cd $HOME/.ssh && cat id_rsa
+```
+
+The existence requirement that stops the guard firing on English had made that
+case depend on whether `~/.ssh/id_rsa` happened to exist. On the machine the
+tests were written on it did, so the suite passed and the hole was invisible.
+The fix is the credential-directory rule in §7, and the harness now builds its
+own `HOME`, so no assertion can ever again be answered by the author's laptop.
+`prose_test.py` pins the new rule against an *empty* `.ssh`, where nothing but
+that rule can save it.
+
+**NOT settled — whether the matrix is green.** Those six jobs failed on the bug
+above, not on any difference between 3.9, 3.11 and 3.13, and they now pass
+locally under a home that reproduces the runner's. The run after this commit is
+what makes the badge mean something.
+
+**NOT verified — `vlt request` on macOS.** Driving Terminal.app through
+`osascript` has no automated coverage, on any platform.
 
 **NOT measured — anything about performance.** No timing claim appears anywhere
 in this README, because none has been measured.

@@ -35,9 +35,35 @@ os.environ["VLT_NO_KEYRING"] = "1"
 os.environ.pop("DISPLAY", None)
 os.environ.pop("WAYLAND_DISPLAY", None)
 
+# ---------------------------------------------------------------- a fake HOME
+# The guard is asked about ~/.ssh, ~/.netrc and friends. Answering from the
+# real home makes every such assertion depend on what the person running the
+# tests happens to own — which is exactly how a hole in the bash guard reached
+# CI reported as a pass. Build the filesystem the tests describe instead.
+FAKE_HOME = os.path.join(VLT_HOME, "home")
+_TREE = {
+    ".ssh/id_rsa": "fixture: a file at this path, not key material\n",
+    ".ssh/id_ed25519": "fixture: a file at this path, not key material\n",
+    ".ssh/id_rsa.pub": "ssh-rsa AAAAB3NzaC1yc2E example\n",
+    ".ssh/config": "Host example\n  User exampleuser\n",
+    ".ssh/known_hosts": "example.invalid ssh-ed25519 AAAAC3Nz\n",
+    ".netrc": "machine example.invalid login exampleuser password EXAMPLE\n",
+    ".aws/credentials": "[default]\naws_access_key_id = EXAMPLE\n",
+    ".npmrc": "//registry.npmjs.org/:_authToken=EXAMPLE\n",
+    "projects/webapp/.env": "API_KEY=EXAMPLE\n",
+    "projects/webapp/app.py": "print('hello')\n",
+}
+for _rel, _body in _TREE.items():
+    _p = os.path.join(FAKE_HOME, _rel)
+    os.makedirs(os.path.dirname(_p), exist_ok=True)
+    with open(_p, "w") as _fh:
+        _fh.write(_body)
+os.environ["HOME"] = FAKE_HOME
+
 _BASE = dict(os.environ)
 _BASE.update({
     "VLT_HOME": VLT_HOME,
+    "HOME": FAKE_HOME,
     # No Secret Service in CI: the file key is the deliberate test choice.
     "VLT_ALLOW_FILE_KEY": "1",
     "VLT_NO_KEYRING": "1",
