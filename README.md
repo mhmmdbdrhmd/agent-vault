@@ -48,22 +48,23 @@ the more projects you have.
 secret**, and a tool that moves a value from that store into the place it is
 needed without the value passing through anything the agent can see.
 
-```
-        the agent                    enforcement                    the vault
-  ┌────────────────────┐      ┌──────────────────────┐     ┌────────────────────┐
-  │ Read  Grep  Glob   │ tool │  PreToolUse guard    │     │ store/   one       │
-  │ Edit  Write  Bash  │─────>│  .env  ~/.ssh  *.pem │     │  AES-256-GCM file  │
-  └────────────────────┘ call │  vlt get / show / rm │     │  per record        │
-            │                 └───────────┬──────────┘     │ index.json  names  │
-            │                      denied │                │ audit.log   who    │
-            │  vlt list / peek / exec     │                └─────────┬──────────┘
-            │  vlt file / render / request│                          │ master key
-            └────────────────────────────────────────────>┌──────────v─────────┐
-                     structure out, values through,       │ OS keyring         │
-                     never printed                        │ Secret Service     │
-                                                          │ / macOS keychain   │
-                                                          └────────────────────┘
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/architecture-dark.svg">
+    <img alt="How a tool call reaches the guard, and how vlt reaches the vault around it" src="docs/figures/architecture-light.svg" width="96%">
+  </picture>
+</p>
+
+
+<table>
+<tr><td><b>Storage</b></td><td>one AES-256-GCM file per secret, with a per-record subkey</td></tr>
+<tr><td><b>Master key</b></td><td>the OS keyring — Secret Service or macOS keychain — never a file on disk</td></tr>
+<tr><td><b>Enforcement</b></td><td>a Claude Code <code>PreToolUse</code> hook, plus the CLI's own refusals</td></tr>
+<tr><td><b>An agent sees</b></td><td>names, field names, length, charset, leading characters</td></tr>
+<tr><td><b>An agent never sees</b></td><td>a value, on any path</td></tr>
+<tr><td><b>Needs</b></td><td>Python 3.8+ and <code>cryptography</code>. Nothing else.</td></tr>
+</table>
+
 
 **Contents** · [Why](#1-why-an-instruction-is-not-enough) ·
 [Install](#2-install) · [Protocol](#3-the-protocol-an-agent-follows) ·
@@ -150,6 +151,13 @@ is in use.
 
 ## 3. The protocol an agent follows
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/protocol-dark.svg">
+    <img alt="vlt list, then peek, then exec or file or render, and request when it is missing" src="docs/figures/protocol-light.svg" width="96%">
+  </picture>
+</p>
+
 Four steps, and the agent holds a value in none of them.
 
 **Find out what exists.** No decryption happens at all — this reads a plaintext
@@ -214,7 +222,12 @@ The session column exists because of a real question — *"was that me, or an
 agent?"* — that the log recorded the answer to and then did not show.
 `vlt audit --session <id>` answers it now.
 
-> Every terminal block above is generated, not typed.
+> Every terminal block and both figures above are generated, not drawn.
+> `python3 docs/make_figures.py` writes the SVGs from one layout and two
+> palettes; `--check` fails if the committed files have drifted, and CI
+> runs it.
+>
+> Every terminal block is captured, not typed.
 > `python3 docs/make_readme_captures.py` builds a throwaway vault of invented
 > records and captures the real output; the files are in
 > [`docs/captures/`](docs/captures/).
@@ -269,8 +282,8 @@ token         EXAM••••••••••••               masked
 url           http••••••••••••               masked
 ```
 
-Per record, you choose: `vlt hide <name> <field>`, `vlt unhide`, or `SPACE` in
-the UI. The leading characters stay visible on purpose — that is what makes
+Per record, you choose: `vlt hide <name> <field>`, `vlt unhide`, or <kbd>Space</kbd>
+in the UI. The leading characters stay visible on purpose — that is what makes
 `peek` useful for checking a format.
 
 ---
@@ -305,8 +318,9 @@ is how [`tests/ui_test.py`](tests/ui_test.py) checks the UI draws at all —
 curses code fails at runtime, not import time, so nothing short of running it is
 evidence.
 
-There is a **Save button** as well as `Ctrl-S`, because `Ctrl-S` is swallowed by
-flow control in some terminals.
+Keys: <kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Tab</kbd> switches pane · <kbd>Space</kbd> masks · <kbd>v</kbd> reveals ·
+<kbd>e</kbd> edits · <kbd>a</kbd> adds · <kbd>q</kbd> quits. There is a **Save button** as well as <kbd>Ctrl</kbd>+<kbd>S</kbd>,
+because <kbd>Ctrl</kbd>+<kbd>S</kbd> is swallowed by flow control in some terminals.
 
 ---
 

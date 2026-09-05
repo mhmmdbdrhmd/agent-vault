@@ -98,3 +98,5 @@ jobs:
             integrations/claude-code/vault-guard.py tests/*.py
       - name: pyflakes
         run: pyflakes vlt vltlib.py vltui.py integrations/claude-code/vault-guard.py tests/*.py
+      - name: Figures match their generator
+        run: python docs/make_figures.py --check

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="218" viewBox="0 0 940 218" role="img" aria-label="the protocol an agent follows">
+  <title>the protocol an agent follows</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#656d76"/>
+    </marker>
+    <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#0969da"/>
+    </marker>
+  </defs>
+  <rect width="940" height="218" fill="#ffffff"/>
+  <rect x="24" y="24" width="213" height="132" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <rect x="40" y="40" width="24" height="22" rx="6" fill="#0969da" stroke="none" stroke-width="1.5"/>
+  <text x="52" y="56" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+  <text x="74" y="56" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace" font-size="13" font-weight="600" fill="#0969da" text-anchor="start">vlt list</text>
+  <text x="40" y="90" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="start">what exists</text>
+  <text x="40" y="116" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#656d76" text-anchor="start">no decryption at all —</text>
+  <text x="40" y="134" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#656d76" text-anchor="start">names and field names only</text>
+  <line x1="239" y1="90" x2="248" y2="90" stroke="#d0d7de" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <rect x="252" y="24" width="213" height="132" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <rect x="268" y="40" width="24" height="22" rx="6" fill="#0969da" stroke="none" stroke-width="1.5"/>
+  <text x="280" y="56" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+  <text x="302" y="56" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace" font-size="13" font-weight="600" fill="#0969da" text-anchor="start">vlt peek</text>
+  <text x="268" y="90" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="start">what shape it is</text>
+  <text x="268" y="116" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#656d76" text-anchor="start">ghp_••••  [40 chars, base64url]</text>
+  <text x="268" y="134" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#656d76" text-anchor="start">enough to check, never to use</text>
+  <line x1="467" y1="90" x2="476" y2="90" stroke="#d0d7de" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <rect x="480" y="24" width="213" height="132" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <rect x="496" y="40" width="24" height="22" rx="6" fill="#0969da" stroke="none" stroke-width="1.5"/>
+  <text x="508" y="56" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+  <text x="530" y="56" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace" font-size="13" font-weight="600" fill="#0969da" text-anchor="start">vlt exec</text>
+  <text x="496" y="90" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="start">use it without seeing it</text>
+  <text x="496" y="116" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#656d76" text-anchor="start">into a child process, a file,</text>
+  <text x="496" y="134" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#656d76" text-anchor="start">or a rendered config</text>
+  <line x1="695" y1="90" x2="704" y2="90" stroke="#d0d7de" stroke-width="1.5" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <rect x="708" y="24" width="213" height="132" rx="10" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <rect x="724" y="40" width="24" height="22" rx="6" fill="#0969da" stroke="none" stroke-width="1.5"/>
+  <text x="736" y="56" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+  <text x="758" y="56" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace" font-size="13" font-weight="600" fill="#0969da" text-anchor="start">vlt request</text>
+  <text x="724" y="90" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1f2328" text-anchor="start">when it is missing</text>
+  <text x="724" y="116" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#656d76" text-anchor="start">opens a separate window</text>
+  <text x="724" y="134" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#656d76" text-anchor="start">for the person to type it in</text>
+  <rect x="24" y="178" width="897" height="36" rx="8" fill="#eaeef2" stroke="#d0d7de" stroke-width="1.5"/>
+  <rect x="24" y="178" width="4" height="36" rx="2" fill="#0969da" stroke="none" stroke-width="1.5"/>
+  <text x="42" y="201" font-family="ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif" font-size="11.5" font-weight="400" fill="#1f2328" text-anchor="start">The value crosses only at step 3, into a process the agent cannot read back — never into the transcript.</text>
+</svg>
