@@ -909,42 +909,64 @@ def cmd_keyring(args):
         print("deleted %s" % label)
     return 0
 
-# --------------------------------------------------------------- scan / import
+# --------------------------------------------------------------------- scanning
+# `vlt scan` is a REPORT: it finds credential-shaped files so a person can decide
+# what to migrate. It never opens a value it does not have to, never prints one,
+# and never moves anything.
 
-SCAN_SKIP = re.compile(
-    r"/(?:node_modules|\.git|venv|\.venv|__pycache__|\.cache|site-packages|"
-    r"\.npm|\.nvm/versions|\.local/share/Trash|snap|\.mozilla|\.steam/steamapps|"
 # Directories with nothing of ours in them. Walking them is slow and noisy, and
 # a hit inside a package cache is somebody else's fixture, not your secret.
-    r"\.cargo/registry|\.gradle|\.m2/repository|dist-packages|"
-    r"\.vscode/extensions|\.vscode-server|\.choosenim|\.dotnet|\.rustup|"
-    r"Android/Sdk|\.arduino15|\.android/build-cache|\.gem|\.rbenv|"
-    r"anyconnect-linux64|\.wine|\.local/lib/python[0-9.]+|"
-    r"\.config/Code/|\.mozilla|\.thunderbird|\.pki/nssdb)/""")
+SCAN_SKIP = re.compile(
+    r"/(?:\.git|\.hg|\.svn|node_modules|__pycache__|\.venv|venv|\.tox|"
+    r"\.cache|\.local/share/vlt|\.local/share/Trash|snap|\.mozilla|"
+    r"site-packages|dist-packages|\.gradle|\.m2|\.cargo/registry|"
+    r"Library/Caches|\.Trash)/")
 
 # Filenames that are credential files by name alone.
-# 2. NEVER print fragments of key material: only extract identifier-shaped keys
-#    from text config files, and never from PEM/binary/cert files.
-BINARYISH = re.compile(r"\.(?:pem|pfx|p12|jks|keystore|der|crt|cer|key)$", re.I)
+SCAN_NAMES = re.compile(
+    r"^(?:\.env(?!\.(?:example|sample|template|dist|tpl)$)(?:\..*)?"
+    r"|[A-Za-z0-9_.-]*\.env"
+    r"|\.netrc|_netrc|\.npmrc|\.pypirc|\.git-credentials"
+    r"|credentials(?:\..*)?|secrets?\.(?:json|ya?ml|env|txt|py|js|ts)"
+    r"|id_rsa|id_dsa|id_ecdsa|id_ed[0-9]+"
+    r"|.*\.(?:pem|pfx|p12|jks|keystore))$", re.IGNORECASE)
+
+# Containers whose bytes are not text worth reading for field names. A .pem may
+# hold a public certificate, which is not a secret, so those are opened once to
+# check for private key material and otherwise dropped.
+BINARYISH = re.compile(r"\.(?:pem|pfx|p12|jks|keystore|der|crt|cer)$",
+                       re.IGNORECASE)
+
+# --deep only: a secret-shaped ASSIGNMENT, not merely the word "password".
+SCAN_CONTENT = re.compile(
+    r"(?:BEGIN\s+(?:RSA|OPENSSH|EC|PGP|DSA)?\s*PRIVATE\s+KEY"
+    # The name may be quoted (JSON, YAML), so allow a closing quote before
+    # the separator: `"api_key": "..."` as well as `API_KEY=...`.
+    r"|(?:api[_-]?key|secret|passwo?rd|token|access[_-]?key)"
+    r"['\"]?\s*[=:]\s*['\"]?[^\s'\",}]{8,}"
+    r"|\bghp_[A-Za-z0-9]{20,}|\bgithub_pat_|\bsk-[A-Za-z0-9]{20,}"
+    r"|\bxox[baprs]-|\bAKIA[A-Z0-9]{12,}|\bAIza[A-Za-z0-9_-]{20,}"
+    r"|\bglpat-|\bshpat_)", re.IGNORECASE)
+
+# Only an identifier-shaped left-hand side is reported as a field name. Without
+# this, a base64 line of a PEM key matched `NAME:` and the scan printed slices
+# of the key itself under "keys:" — the one thing this command must never do.
 IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{1,39}$")
 
-SCAN_NAMES = re.compile(
-    r"(?:^\.env(?!\.(?:example|sample|template|dist|tpl)$)(?:\..+)?$"
-    r"|^\.netrc$|^_netrc$|^\.npmrc$|^\.pypirc$|^\.git-credentials$"
-    r"|^credentials(?:\..+)?$|^secrets?\.(?:json|ya?ml|env|txt|py|js|ts)$"
-    r"|^.*token.*\.(?:txt|json)$|^.*\.(?:pem|pfx|p12|jks)$"
-    r"|^id_(?:rsa|dsa|ecdsa|ed[0-9]+)$)", re.IGNORECASE)
-
-SCAN_CONTENT = re.compile(
-    r"(?:BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20}|github_pat_[A-Za-z0-9_]{20}"
-    r"|sk-[A-Za-z0-9]{20}|xox[baprs]-[A-Za-z0-9-]{10}|AKIA[A-Z0-9]{16}"
-    r"|AIza[A-Za-z0-9_-]{30}|glpat-[A-Za-z0-9_-]{15}"
-    r"|(?:api[_-]?key|apikey|password|passwd|secret|token)\s*[=:]\s*"
-    r"[\"\']?[A-Za-z0-9_\-./+]{8,})", re.IGNORECASE)
-
+# Credentials the machine itself needs where they are. A record of these belongs
+# in the vault; the live file stays put, and the guard keeps agents out of it.
 MACHINE_KEEP = re.compile(
-    r"(?:/\.cert/nm-openvpn/|/\.config/kdeconnect/|/\.mitmproxy/"
-    r"|/\.claude/\.credentials\.json$|/\.ssh/id_[^/]*$|/known_hosts)")
+    r"(?:/\.ssh/|/\.gnupg/|/\.cert/nm-openvpn/|/\.config/kdeconnect/|"
+    r"/\.mitmproxy/|/\.claude/\.credentials\.json|/Library/Keychains/|"
+    r"/etc/)")
+
+
+def _me():
+    """A default account name that is not the author's."""
+    try:
+        return re.sub(r"[^a-z0-9._-]+", "-", getpass.getuser().lower()) or "me"
+    except Exception:
+        return "me"
 
 
 def _suggest(path):
@@ -952,13 +974,11 @@ def _suggest(path):
     parent = os.path.basename(os.path.dirname(path)).lower()
     parent = re.sub(r"[^a-z0-9._-]+", "-", parent).strip("-") or "misc"
     if base in (".netrc", "_netrc"):
-        return "heroku.com/mbadriah", "login"
-# Credentials the machine itself needs where they are. A record of these belongs
-# in the vault; the live file stays put, and the guard keeps agents out of it.
+        return "heroku.com/%s" % _me(), "login"
     if base == ".npmrc":
-        return "npmjs.com/mbadriah", "token"
+        return "npmjs.com/%s" % _me(), "token"
     if base == ".pypirc":
-        return "pypi.org/mbadriah", "token"
+        return "pypi.org/%s" % _me(), "token"
     if base.startswith(".env"):
         return "project/%s" % parent, "service"
     if base.endswith((".pem", ".p12", ".pfx", ".jks")):

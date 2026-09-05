@@ -26,13 +26,34 @@ SUITES = [
     ("form_test",    False, 30),   # type defaults, Save/Cancel
     ("layout_test",  False, 30),   # form geometry
     ("ui_test",      True, 180),   # the UI, driven through a pty
+    ("scan_test",    False, 90),   # the inventory report, and its silence
+    ("keyring_test", False, 60),   # real keychain / Secret Service round trip
 ]
 
 
+def count():
+    """Assertions actually executed, per suite. Prints the README's number."""
+    total = 0
+    for name, _, timeout in SUITES:
+        path = os.path.join(HERE, name + ".py")
+        r = subprocess.run([sys.executable, path], capture_output=True,
+                           text=True, timeout=timeout)
+        n = sum(1 for l in r.stdout.splitlines() if l.startswith("ok "))
+        state = "" if r.returncode == 0 else "  (FAILED)"
+        if not n and any(l.startswith("skipped:") for l in r.stdout.splitlines()):
+            state = "  (not run here)"
+        print("  %-14s %4d%s" % (name, n, state))
+        total += n
+    print("\n  %-14s %4d" % ("total", total))
+    return 0
+
+
 def main():
+    if "--count" in sys.argv:
+        return count()
     fast = "--fast" in sys.argv
     only = [a for a in sys.argv[1:] if not a.startswith("-")]
-    failed, skipped = [], []
+    failed, skipped, declined = [], [], []
 
     for name, needs_pty, timeout in SUITES:
         if only and name not in only:
@@ -54,7 +75,15 @@ def main():
             continue
         took = time.time() - started
         if r.returncode == 0:
-            print("  %-14s pass   (%.1fs)" % (name, took))
+            # A suite may decline to run (keyring_test needs a real keyring).
+            # Saying "pass" would claim it checked something it did not.
+            why = next((l for l in r.stdout.splitlines()
+                        if l.startswith("skipped:")), None)
+            if why:
+                declined.append((name, why[len("skipped:"):].strip()))
+                print("  %-14s SKIP   %s" % (name, why[len("skipped:"):].strip()))
+            else:
+                print("  %-14s pass   (%.1fs)" % (name, took))
         else:
             print("  %-14s FAIL   (%.1fs)" % (name, took))
             for line in (r.stdout + r.stderr).splitlines():
@@ -65,11 +94,15 @@ def main():
     print()
     if skipped:
         print("skipped (--fast): %s" % ", ".join(skipped))
+    if declined:
+        for name, why in declined:
+            print("not run: %s — %s" % (name, why))
     if failed:
         print("%d SUITE(S) FAILED: %s"
               % (len(failed), ", ".join(n for n, _ in failed)))
         return 1
-    print("all suites passed")
+    print("all suites passed%s"
+          % (" (%d not run)" % len(declined) if declined else ""))
     return 0
 
 

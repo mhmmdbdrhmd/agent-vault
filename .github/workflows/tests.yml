@@ -1,0 +1,100 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The suites that need no keyring: the guard, masking, exec, the UI. They run
+  # against a throwaway VLT_HOME with VLT_NO_KEYRING=1, which is why they are
+  # safe on a shared runner and why they say nothing about the keyring backends.
+  suites:
+    name: suites (${{ matrix.os }}, python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip cryptography pyte
+      - name: Run every suite
+        run: python tests/run_all.py
+
+  # The one thing the suites above cannot cover: the master key really going
+  # into, and coming back out of, a system keyring. This is the evidence behind
+  # the platform claim in the README — the macOS keychain path is exercised on a
+  # Mac, not reasoned about on Linux.
+  keyring-macos:
+    name: macOS login keychain
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip cryptography
+      - name: Round-trip the master key through the login keychain
+        env:
+          VLT_KEYRING_TEST: "1"
+        run: python tests/keyring_test.py
+
+  keyring-linux:
+    name: Secret Service keyring
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install a Secret Service provider
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring dbus-x11 libsecret-1-0
+          python -m pip install --upgrade pip cryptography secretstorage
+      - name: Round-trip the master key through gnome-keyring
+        env:
+          VLT_KEYRING_TEST: "1"
+        # gnome-keyring needs a session bus and an unlocked login keyring. The
+        # password is fed on stdin and is meaningless: the keyring is created
+        # here and destroyed with the runner.
+        run: |
+          dbus-run-session -- bash -c '
+            echo ci-runner-throwaway | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            python tests/keyring_test.py'
+
+  preflight:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # preflight reads history, not just the tree
+      - name: Run the pre-push audit
+        run: bash preflight.sh
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip pyflakes
+      - name: Byte-compile everything
+        run: |
+          python -m py_compile vlt vltlib.py vltui.py \
+            integrations/claude-code/vault-guard.py tests/*.py
+      - name: pyflakes
+        run: pyflakes vlt vltlib.py vltui.py integrations/claude-code/vault-guard.py tests/*.py

@@ -9,8 +9,6 @@ curses only: no third-party dependency, so the vault stays self-contained.
 """
 
 import curses
-import os
-import sys
 
 import vltlib as V
 
@@ -305,7 +303,7 @@ class Form:
         y = 3
         ok = self._valid()
         self._row(y, "branch", self.name or "(required)", 0,
-                  extra="" if ok else "  ◀ like vps/senko/3x-ui", bad=not ok)
+                  extra="" if ok else "  ◀ like vps/alpha/3x-ui", bad=not ok)
         y += 1
         self._row(y, "type", self.rtype, 1,
                   extra="   ←→ changes the type and its usual fields")

@@ -16,7 +16,6 @@ import harness as TH                                    # noqa: E402
 
 sys.path.insert(0, TH.REPO)
 import os
-import subprocess
 import sys
 
 import vltlib as V      # noqa: E402
