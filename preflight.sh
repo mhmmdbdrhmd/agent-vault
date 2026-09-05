@@ -38,12 +38,37 @@ KEYFILES=$(git ls-files | grep -iE '(^|/)(\.env($|\.)|id_rsa|id_ed25519|.*\.pem$
 $(echo "$KEYFILES" | sed 's/^/         /')" || ok "no credential-shaped filenames tracked"
 
 # By content, not by name — catches a private key called anything at all.
-KEYBLOBS=$(git grep -lIE 'BEGIN (RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY|BEGIN CERTIFICATE' -- . 2>/dev/null || true)
+#
+# A header line ALONE is not key material: a scanner's own pattern, a test
+# asserting that pattern is refused, and documentation about PEM files all
+# contain one. Real key material is a header followed by a base64 body, so the
+# body is what is required. Without that, this repository tripped its own check
+# on every run for ever, which is how a scanner gets ignored.
+keyscan() {   # keyscan <NUL-separated file list on stdin>
+  python3 -c '
+import re, sys
+HEAD = re.compile(r"-----BEGIN [A-Z0-9 ]*(PRIVATE KEY|CERTIFICATE)-----")
+BODY = re.compile(r"^[A-Za-z0-9+/=]{40,}\s*$")
+for path in sys.stdin.read().split("\0"):
+    if not path:
+        continue
+    try:
+        lines = open(path, encoding="utf-8", errors="ignore").read().split("\n")
+    except (IOError, OSError):
+        continue
+    for i, line in enumerate(lines):
+        if HEAD.search(line) and any(BODY.match(l) for l in lines[i + 1:i + 4]):
+            print(path)
+            break
+'
+}
+
+KEYBLOBS=$(git ls-files -z 2>/dev/null | keyscan || true)
 [ -n "$KEYBLOBS" ] && hit "private key / certificate material in tracked files:
 $(echo "$KEYBLOBS" | sed 's/^/         /')" || ok "no key material by content"
 
 # Untracked key material in the tree is one 'git add .' from permanent.
-UNKEY=$(git ls-files --others --exclude-standard -z 2>/dev/null | xargs -0 -r grep -lIE 'BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY' 2>/dev/null || true)
+UNKEY=$(git ls-files --others --exclude-standard -z 2>/dev/null | keyscan || true)
 [ -n "$UNKEY" ] && hit "UNTRACKED private key sitting in the working tree:
 $(echo "$UNKEY" | sed 's/^/         /')
          (move it out of the repo directory entirely)" || ok "no untracked key material"
@@ -132,7 +157,10 @@ DATADIR=$(git ls-files | awk -F/ 'NF>1{print $1}' | sort -u \
 # which no local grep can reach anyway.
 
 AUTHORS=$(git log --format='%an <%ae>' 2>/dev/null | sort -u)
-NAUTH=$(echo "$AUTHORS" | grep -c . || echo 0)
+# `grep -c` already prints 0 on no match; the old `|| echo 0` appended a second
+# line, and the comparison below then failed on a repo with no commits yet.
+NAUTH=$(printf '%s\n' "$AUTHORS" | grep -c . || true)
+NAUTH=${NAUTH:-0}
 echo "         authors recorded in history:"
 echo "$AUTHORS" | sed 's/^/           /'
 if [ "$NAUTH" -gt 1 ]; then
