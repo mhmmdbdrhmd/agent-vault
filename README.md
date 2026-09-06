@@ -1,6 +1,6 @@
-<h1 align="center">agent-vault</h1>
+<h1 align="center">credfence</h1>
 <p align="center"><i>Let coding agents use your credentials without ever seeing them</i></p>
-<p align="center"><a href="https://github.com/mhmmdbdrhmd/agent-vault/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/agent-vault/actions/workflows/tests.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-6E7681?style=flat-square"> <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white"> <img alt="crypto" src="https://img.shields.io/badge/AES--256--GCM-per%20record-E7352C?style=flat-square"> <img alt="tests" src="https://img.shields.io/badge/tests-347%20assertions-58A6FF?style=flat-square"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/credfence/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/credfence/actions/workflows/tests.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-6E7681?style=flat-square"> <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white"> <img alt="crypto" src="https://img.shields.io/badge/AES--256--GCM-per%20record-E7352C?style=flat-square"> <img alt="tests" src="https://img.shields.io/badge/tests-347%20assertions-58A6FF?style=flat-square"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"></p>
 
 > An agent can find out that a GitHub token exists, confirm it starts `ghp_` and
 > is 40 characters, and run `gh` with it in the environment — **without the value
@@ -11,9 +11,9 @@
 > hook, which is what makes the restrictions mechanical rather than advisory.
 > The `vlt` CLI and the whole protocol work under any agent, but without a
 > pre-tool hook nothing stops that agent reading `~/.ssh` directly, and none of
-> the guarantees below hold. → [Integrations](#8-integrations)
+> the guarantees below hold. → [Integrations](#9-integrations)
 >
-> **This is not a sandbox.** → [Known issues and limits](#12-known-issues-and-limits)
+> **This is not a sandbox.** → [Known issues and limits](#13-known-issues-and-limits)
 
 <details open>
 <summary><b>Contents</b></summary>
@@ -26,12 +26,13 @@
 - [5. Masking is fail-closed](#5-masking-is-fail-closed)
 - [6. The terminal UI](#6-the-terminal-ui)
 - [7. What agents can and cannot do](#7-what-agents-can-and-cannot-do)
-- [8. Integrations](#8-integrations)
-- [9. Recovering without this tool](#9-recovering-without-this-tool)
-- [10. Testing](#10-testing)
-- [11. Verification status](#11-verification-status)
-- [12. Known issues and limits](#12-known-issues-and-limits)
-- [13. Future development](#13-future-development)
+- [8. Related work, and when to use something else](#8-related-work-and-when-to-use-something-else)
+- [9. Integrations](#9-integrations)
+- [10. Recovering without this tool](#10-recovering-without-this-tool)
+- [11. Testing](#11-testing)
+- [12. Verification status](#12-verification-status)
+- [13. Known issues and limits](#13-known-issues-and-limits)
+- [14. Future development](#14-future-development)
 - [License](#license)
 - [Author](#author)
 
@@ -44,7 +45,7 @@ the chat, where they stay in the transcript for ever, or in a `.env` the agent
 can read — plaintext on disk, and every agent can read all of it. Both get worse
 the more projects you have.
 
-`agent-vault` replaces both with one encrypted store, **one AES-256-GCM file per
+`credfence` replaces both with one encrypted store, **one AES-256-GCM file per
 secret**, and a tool that moves a value from that store into the place it is
 needed without the value passing through anything the agent can see.
 
@@ -71,9 +72,10 @@ needed without the value passing through anything the agent can see.
 [Records](#4-one-record-shape-for-everything) ·
 [Masking](#5-masking-is-fail-closed) · [UI](#6-the-terminal-ui) ·
 [Permissions](#7-what-agents-can-and-cannot-do) ·
-[Integrations](#8-integrations) · [Recovery](#9-recovering-without-this-tool) ·
-[Testing](#10-testing) · [Verification](#11-verification-status) ·
-[Limits](#12-known-issues-and-limits) · [Future](#13-future-development)
+[Related work](#8-related-work-and-when-to-use-something-else) ·
+[Integrations](#9-integrations) · [Recovery](#10-recovering-without-this-tool) ·
+[Testing](#11-testing) · [Verification](#12-verification-status) ·
+[Limits](#13-known-issues-and-limits) · [Future](#14-future-development)
 
 ---
 
@@ -112,8 +114,8 @@ Service provider on Linux (gnome-keyring, kwallet, keepassxc), or the login
 keychain on macOS.
 
 ```bash
-git clone https://github.com/mhmmdbdrhmd/agent-vault
-cd agent-vault
+git clone https://github.com/mhmmdbdrhmd/credfence
+cd credfence
 ./install.sh
 ```
 
@@ -377,7 +379,36 @@ must still die".
 
 ---
 
-## 8. Integrations
+## 8. Related work, and when to use something else
+
+**[Infisical's Agent Vault](https://github.com/Infisical/agent-vault)** solves
+the adjacent problem, and for HTTP APIs it solves it better. It is a proxy: the
+agent holds a placeholder, and real credentials are injected into outbound
+requests at the boundary, so the secret never enters the agent's process at all.
+That is a stronger guarantee than anything here, and if every credential you
+hand an agent is an API key used over HTTPS, **use theirs.**
+
+The two do not overlap as much as the names suggest:
+
+| | Infisical Agent Vault | credfence |
+|---|---|---|
+| Shape | a proxy daemon, on its own host | a CLI and a tool-layer hook, on yours |
+| The agent holds | a placeholder — never the value | the value, inside a child process it cannot read back |
+| Covers | anything spoken over HTTP/HTTPS | SSH keys, database passwords, VPN profiles, signing keys, rendered `.env` files — anything local |
+| Stops `cat ~/.ssh/id_rsa` | no | yes, before the tool call runs |
+| Needs | a daemon, a database, a master password, `HTTPS_PROXY` on every agent | `git clone` and `./install.sh` |
+| Maturity | company-backed, hundreds of commits | one author, and this repository's history is all of it |
+
+The distinction that matters: a proxy protects the credentials it brokers.
+It does nothing about the credentials already sitting in your home directory,
+which is where an agent with a shell will look first. This protects those, and
+gives you one place to keep the rest.
+
+Run both if it fits. They interfere with nothing in each other.
+
+---
+
+## 9. Integrations
 
 **Claude Code — fully supported.** The guard runs as a `PreToolUse` hook, which
 is what makes any of this mechanical. `integrations/claude-code/` holds the hook
@@ -392,7 +423,7 @@ covered because the CLI runs.
 
 ---
 
-## 9. Recovering without this tool
+## 10. Recovering without this tool
 
 The format is deliberately plain, so a vault is never hostage to this program:
 `b"VLT1"` + a 12-byte nonce + AES-256-GCM ciphertext, with the record name
@@ -419,7 +450,7 @@ There is no custom cryptography anywhere; everything comes from the
 
 ---
 
-## 10. Testing
+## 11. Testing
 
 ```bash
 python3 tests/run_all.py            # everything
@@ -453,7 +484,7 @@ The four worth knowing about:
 
 ---
 
-## 11. Verification status
+## 12. Verification status
 
 <details open>
 <summary><i>expand</i></summary>
@@ -521,7 +552,7 @@ in this README, because none has been measured.
 
 ---
 
-## 12. Known issues and limits
+## 13. Known issues and limits
 
 <details open>
 <summary><i>expand</i></summary>
@@ -570,7 +601,7 @@ Full detail, including the assumptions:
 
 ---
 
-## 13. Future development
+## 14. Future development
 
 <details>
 <summary><i>expand</i></summary>

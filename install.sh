@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install agent-vault: the `vlt` CLI, and the Claude Code guard that enforces it.
+# Install credfence: the `vlt` CLI, and the Claude Code guard that enforces it.
 #
 # Safe to re-run. It never touches an existing vault, and it backs up any file
 # it replaces. `./install.sh --uninstall` reverses everything except your vault,
@@ -27,7 +27,7 @@ backup() {  # backup <file> — keep whatever was there before
 
 # --------------------------------------------------------------- uninstall
 if [ "${1:-}" = "--uninstall" ]; then
-  head_ "Removing agent-vault"
+  head_ "Removing credfence"
   rm -f "$BIN/vlt" "$SHARE/vltlib.py" "$SHARE/vltui.py"
   rm -f "$CLAUDE/hooks/vault-guard.py"
   rm -rf "$CLAUDE/skills/vault"

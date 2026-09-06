@@ -229,7 +229,7 @@ def _mac_set(raw, label=None, account=None):
     # a password on stdin without a terminal to prompt at.
     _mac(["add-generic-password", "-U", "-A",
           "-s", label, "-a", account,
-          "-D", "agent-vault master key",
+          "-D", "credfence master key",
           "-j", "AES-256 master key for the vlt credential vault",
           "-w", base64.b64encode(raw).decode()], check=True)
 

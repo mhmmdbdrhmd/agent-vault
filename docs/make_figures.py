@@ -199,7 +199,7 @@ def architecture(theme):
     cv.text(vx + vw - 34, (vy + vh + ky) / 2 + 4, "master key", size=11,
             fill=c["muted"])
 
-    return cv.render("agent-vault architecture")
+    return cv.render("credfence architecture")
 
 
 # ------------------------------------------------------------------ figure two
