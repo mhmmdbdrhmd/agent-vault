@@ -78,6 +78,14 @@ _BASE.update({
     "PYTHONPATH": REPO + os.pathsep + _BASE_PYTHONPATH
     if (_BASE_PYTHONPATH := os.environ.get("PYTHONPATH", "")) else REPO,
 })
+# No installed `vlt` on the test PATH. A suite that shells out to a bare "vlt"
+# would otherwise run whatever build happens to sit in ~/.local/bin — passing on
+# the author's machine while testing code that is not in this tree, and failing
+# on every runner. Removing it makes that mistake fail identically everywhere.
+_BASE["PATH"] = os.pathsep.join(
+    d for d in os.environ.get("PATH", "").split(os.pathsep)
+    if d and not os.path.exists(os.path.join(d, "vlt")))
+
 _BASE.pop("VLT_HUMAN", None)
 _BASE.pop("VLT_TEST_CONFIRM", None)
 

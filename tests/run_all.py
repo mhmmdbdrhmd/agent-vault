@@ -86,9 +86,16 @@ def main():
                 print("  %-14s pass   (%.1fs)" % (name, took))
         else:
             print("  %-14s FAIL   (%.1fs)" % (name, took))
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.startswith("FAIL") or "Error" in line or "error" in line:
-                    print("      %s" % line[:160])
+            # Print what the suite actually said, not a keyword grep of it.
+            # Filtering here once turned a CI failure into six identical
+            # "FAILED" lines with no reason attached, and the log is the only
+            # thing a remote runner leaves behind.
+            body = (r.stdout + r.stderr).rstrip().splitlines()
+            head, tail = body[:8], body[-25:]
+            shown = head + (["      ..."] if len(body) > 33 else []) + tail \
+                if len(body) > 33 else body
+            for line in shown:
+                print("      %s" % line[:200])
             failed.append((name, "failed"))
 
     print()

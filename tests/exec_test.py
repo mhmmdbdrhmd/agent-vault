@@ -44,7 +44,7 @@ val = TH.vlt(["get", SECRET, "token"]).stdout.strip()
 
 fails = []
 for label, cmd, want in CASES:
-    r = subprocess.run(["vlt", "exec", SECRET, "--"] + cmd,
+    r = subprocess.run([sys.executable, TH.VLT, "exec", SECRET, "--"] + cmd,
                        capture_output=True, text=True, env=env)
     blocked = r.returncode == 16
     got = "DENY" if blocked else "ALLOW"
