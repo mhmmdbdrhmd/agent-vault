@@ -586,7 +586,7 @@ def audit(action, name="-", detail="", ok=True):
 DEFAULT_POLICY = {
     "agent_denied_commands": [
         "get", "show", "export", "add", "edit", "set", "rm", "identity",
-        "_values", "import", "hide", "unhide",
+        "_values", "import", "hide", "unhide", "rename", "ui", "keyring",
     ],
     "allow": ["*"],
     "deny": [],
@@ -599,6 +599,13 @@ def policy():
             p = json.load(fh)
         for k, v in DEFAULT_POLICY.items():
             p.setdefault(k, v)
+        # Denials are the union of the vault's list and the built-in one. A
+        # vault created before a command was denied should pick the denial up,
+        # and a union can only ever add refusals — never drop one the file
+        # asked for.
+        p["agent_denied_commands"] = sorted(
+            set(p.get("agent_denied_commands", ()))
+            | set(DEFAULT_POLICY["agent_denied_commands"]))
         return p
     except Exception:
         return dict(DEFAULT_POLICY)

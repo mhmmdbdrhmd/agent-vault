@@ -72,6 +72,10 @@ def _has_gui():
     launchctl which session manager owns this process does. "Aqua" means a
     real login session — a daemon, an SSH login or a CI runner says otherwise.
     """
+    if os.environ.get("VLT_NO_DESKTOP") == "1":
+        # Said out loud, because there is nothing to detect. A CI runner has a
+        # real Aqua session and will happily draw a dialog nobody will answer.
+        return False
     if sys.platform == "darwin":
         try:
             r = subprocess.run(["launchctl", "managername"],

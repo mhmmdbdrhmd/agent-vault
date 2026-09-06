@@ -34,6 +34,10 @@ os.environ["VLT_ALLOW_FILE_KEY"] = "1"
 os.environ["VLT_NO_KEYRING"] = "1"
 os.environ.pop("DISPLAY", None)
 os.environ.pop("WAYLAND_DISPLAY", None)
+# Stripping DISPLAY says "no desktop" on Linux and nothing at all on
+# macOS, where a runner has a real Aqua login session and a dialog would
+# simply open and wait. Say it in a way both platforms understand.
+os.environ["VLT_NO_DESKTOP"] = "1"
 
 # ---------------------------------------------------------------- a fake HOME
 # The guard is asked about ~/.ssh, ~/.netrc and friends. Answering from the
@@ -75,6 +79,7 @@ _BASE.update({
     # No Secret Service in CI: the file key is the deliberate test choice.
     "VLT_ALLOW_FILE_KEY": "1",
     "VLT_NO_KEYRING": "1",
+    "VLT_NO_DESKTOP": "1",
     "PYTHONPATH": REPO + os.pathsep + _BASE_PYTHONPATH
     if (_BASE_PYTHONPATH := os.environ.get("PYTHONPATH", "")) else REPO,
 })
