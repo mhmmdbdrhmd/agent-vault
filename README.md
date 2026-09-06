@@ -537,10 +537,24 @@ own `HOME`, so no assertion can ever again be answered by the author's laptop.
 `prose_test.py` pins the new rule against an *empty* `.ssh`, where nothing but
 that rule can save it.
 
-**NOT settled — whether the matrix is green.** Those six jobs failed on the bug
-above, not on any difference between 3.9, 3.11 and 3.13, and they now pass
-locally under a home that reproduces the runner's. The run after this commit is
-what makes the badge mean something.
+**Verified — the full matrix, green.** All ten jobs pass: the suites on Ubuntu
+and macOS across Python 3.9, 3.11 and 3.13, both keyring round trips, the secret
+scan over full history, and the linter.
+
+It took four runs, and each red one was a real defect rather than a CI quirk:
+
+| | what CI found | why it passed locally |
+|---|---|---|
+| 1 | `cd ~/.ssh && cat id_rsa` was allowed when that file did not exist | the author owns an `id_rsa` |
+| 2 | the macOS keychain job hung for 4 h 44 m | the fake `HOME` that fixed (1) has no login keychain |
+| 3 | `exec_test` ran the *installed* `vlt`, not the one in the tree | `~/.local/bin/vlt` exists here |
+| 4 | `vlt rename` and `vlt ui` were never denied to agents at all | the confirmation dialog needs a desktop, and CI has one |
+
+Every one of those is a bug that a machine other than the author's had to
+find. Three of them are the same mistake in different clothes — a test
+answering from the developer's environment instead of the repository — which is
+why the harness now builds its own `HOME`, strips any installed `vlt` from
+`PATH`, and states `VLT_NO_DESKTOP` rather than inferring it.
 
 **NOT verified — `vlt request` on macOS.** Driving Terminal.app through
 `osascript` has no automated coverage, on any platform.
