@@ -58,6 +58,30 @@ NEEDS_CONFIRM = {"get", "show", "export", "identity", "hide", "unhide",
                  "set", "import", "rm", "rename", "ui", "keyring"}
 
 
+# How long to wait for a person to answer a confirmation dialog. Refusing after
+# this is the safe direction: a prompt nobody answers must not become a process
+# nobody notices.
+CONFIRM_TIMEOUT = 120
+
+
+def _has_gui():
+    """Is there a desktop session a dialog could actually appear on?
+
+    On Linux that question is DISPLAY. On macOS `osascript` exists whether or
+    not anyone is logged in at the screen, so it answers nothing; asking
+    launchctl which session manager owns this process does. "Aqua" means a
+    real login session — a daemon, an SSH login or a CI runner says otherwise.
+    """
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(["launchctl", "managername"],
+                               capture_output=True, text=True, timeout=5)
+            return r.stdout.strip() == "Aqua"
+        except Exception:
+            return False
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def confirm_human(cmd, detail=""):
     """Prove a person is present. An env var alone is not proof.
 
@@ -77,7 +101,8 @@ def confirm_human(cmd, detail=""):
            "Allow it only if you started it yourself." % (cmd, detail))
 
     dialog = None
-    if sys.platform == "darwin" and shutil.which("osascript"):
+    if (sys.platform == "darwin" and shutil.which("osascript")
+            and _has_gui()):
         script = ('display dialog %s with title "vlt \u2014 confirm" '
                   'buttons {"Deny", "Allow"} default button "Deny" '
                   'with icon caution' % json.dumps(msg))
@@ -85,14 +110,22 @@ def confirm_human(cmd, detail=""):
         # osascript exits 0 for BOTH buttons; only Esc gives non-zero. The
         # answer is in stdout, so it has to be read rather than inferred.
         approved = lambda r: b"Allow" in r.stdout
-    elif shutil.which("zenity") and os.environ.get("DISPLAY"):
+    elif shutil.which("zenity") and _has_gui():
         dialog = ["zenity", "--question", "--title", "vlt \u2014 confirm",
                   "--text", msg, "--ok-label", "Allow",
                   "--cancel-label", "Deny", "--default-cancel"]
         approved = lambda r: True          # zenity says Deny with exit 1
 
     if dialog:
-        r = subprocess.run(dialog, capture_output=True)
+        try:
+            r = subprocess.run(dialog, capture_output=True,
+                               timeout=CONFIRM_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            V.audit("confirm", detail or "-",
+                    "no answer within %ds for %s" % (CONFIRM_TIMEOUT, cmd),
+                    ok=False)
+            die("no answer at the confirmation dialog within %ds — refused."
+                % CONFIRM_TIMEOUT, 17)
         if r.returncode == 0 and approved(r):
             V.audit("confirm", detail or "-", "approved at the desktop for %s" % cmd)
             return
@@ -117,7 +150,8 @@ def _term_prompt(spec):
     helper = [sys.executable, os.path.abspath(__file__), "_prompt", payload.name]
 
     launched = False
-    if sys.platform == "darwin" and shutil.which("osascript"):
+    if (sys.platform == "darwin" and shutil.which("osascript")
+            and _has_gui()):
         # Terminal.app's `do script` returns as soon as the window opens, so
         # there is nothing to wait on. The helper drops a marker beside the
         # payload when the person is finished, and that is what is waited for.
@@ -141,7 +175,7 @@ def _term_prompt(spec):
                 os.unlink(done)
             except OSError:
                 pass
-    if not launched and shutil.which("gnome-terminal") and os.environ.get("DISPLAY"):
+    if not launched and shutil.which("gnome-terminal") and _has_gui():
         try:
             subprocess.run(
                 ["gnome-terminal", "--wait", "--title",
@@ -150,7 +184,7 @@ def _term_prompt(spec):
             launched = True
         except Exception:
             launched = False
-    if not launched and shutil.which("xterm") and os.environ.get("DISPLAY"):
+    if not launched and shutil.which("xterm") and _has_gui():
         try:
             subprocess.run(["xterm", "-T", "vlt — enter credentials", "-e"]
                            + helper, check=False, timeout=900)

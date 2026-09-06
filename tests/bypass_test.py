@@ -68,6 +68,26 @@ env_ok = {**AGENT, "VLT_HUMAN": "1", "VLT_TEST_CONFIRM": "1"}
 r = TH.vlt(["get", SECRET, "token"], env=env_ok)
 check("confirmed human still works", r.returncode == 0 and VAL in r.stdout)
 
+# 6. And it refuses PROMPTLY. With no terminal and no desktop, vlt must decide
+# on its own rather than wait for an answer that is not coming. This is the
+# assertion that would have caught the macOS dialog hang: every check above
+# passes just as well when the command takes a minute and a half.
+import subprocess                                        # noqa: E402
+import time                                              # noqa: E402
+
+for cmd in (["rename", SECRET, "test/elsewhere"], ["get", SECRET, "token"],
+            ["ui"]):
+    started = time.time()
+    try:
+        r = subprocess.run([sys.executable, TH.VLT] + cmd, env=AGENT,
+                           capture_output=True, text=True, timeout=20)
+        took = time.time() - started
+        check("`%s` refused, and promptly (%.1fs)" % (cmd[0], took),
+              r.returncode != 0 and took < 10)
+    except subprocess.TimeoutExpired:
+        check("`%s` refused, and promptly" % cmd[0], False,
+              "hung for 20s waiting for a prompt nothing can answer")
+
 print()
 print("all clear" if not fails else "%d FAILURE(S): %s" % (len(fails), fails))
 sys.exit(1 if fails else 0)
