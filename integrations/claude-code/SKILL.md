@@ -62,7 +62,7 @@ masked fields as leading characters + length + charset, and unmasked fields in f
 ```
 hidden   : key, password, secret, token
 token:       ghp_••••••••••••   [40 chars, base64url]
-username:    exampleuser[8 chars, base62]
+username:    exampleuser   [11 chars, base62]
 ```
 
 Use this to verify a credential has the shape you expect — that a GitHub token starts
