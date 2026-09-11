@@ -194,15 +194,24 @@ def _collect_paste(win, limit=1 << 18):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def drain_pending(win, limit=1 << 18):
-    """Whatever is ALREADY queued, as text. Empty if the person is typing.
+# How long to wait for the next character before deciding a paste has ended.
+# Above the gap between bytes of a paste (microseconds, even chunked across a
+# pty) and below the gap between two deliberate keypresses (~100ms+).
+PASTE_WINDOW_MS = 60
 
-    The fallback for terminals without bracketed paste. Human keystrokes
-    arrive milliseconds apart, so a non-blocking read after Enter returns
-    nothing; the tail of a paste is sitting in the buffer and returns at once.
+
+def drain_pending(win, limit=1 << 18, window=PASTE_WINDOW_MS):
+    """Whatever the terminal is still delivering, as text.
+
+    The fallback for terminals without bracketed paste. A paste does not cross
+    a pty atomically, so asking only for what is buffered RIGHT NOW returns
+    before the rest of it has arrived — and the remainder then reaches the key
+    handler, which is the failure this exists to prevent. Waiting a short
+    window per character catches the whole burst. A real Enter costs one
+    window and returns empty.
     """
     out = []
-    win.nodelay(True)
+    win.timeout(window)
     try:
         while len(out) < limit:
             c = win.getch()
@@ -210,7 +219,7 @@ def drain_pending(win, limit=1 << 18):
                 break
             out.append(c)
     finally:
-        win.nodelay(False)
+        win.timeout(-1)
     if out[:5] == _PASTE_BEGIN:                 # a paste the parser missed
         del out[:5]
     if out[-6:] == _PASTE_END:

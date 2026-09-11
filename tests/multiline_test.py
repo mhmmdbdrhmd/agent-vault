@@ -88,8 +88,90 @@ check("`vlt set … -` stores the whole key",
 
 
 # ------------------------------------------------------- 3. the plain prompt path
-def prompt_paste(name, fields, typed, plain=True, wait=2.5):
-    """Drive `vlt _prompt` through a pty and return the saved record."""
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]|\x1b[=>]")
+
+
+def _readable(fd, timeout):
+    import select
+    try:
+        return bool(select.select([fd], [], [], timeout)[0])
+    except Exception:
+        return False
+
+
+class Pty(object):
+    """A child under a pty, driven by what it prints.
+
+    Every wait here is for an OBSERVED string, never for a duration. The one
+    remaining sleep is the settle after the last keystroke, and it exists only
+    so the child can finish writing before it is reaped.
+    """
+
+    def __init__(self, argv, env):
+        self.seen = ""
+        self.text = ""
+        self.mark = 0
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            os.execve(argv[0], argv, env)
+
+    def _pump(self, timeout=0.2):
+        if not _readable(self.fd, timeout):
+            return False
+        try:
+            chunk = os.read(self.fd, 65536)
+        except (OSError, BlockingIOError):
+            return False
+        if not chunk:
+            return False
+        self.seen += chunk.decode("utf-8", "replace")
+        self.text = ANSI_RE.sub("", self.seen)
+        return True
+
+    def expect(self, pattern, timeout=45):
+        """Wait for the child to print something matching, SINCE the last wait.
+
+        A curses screen redraws the same footer every frame, so searching the
+        whole buffer would match the previous frame and return before the
+        child had done anything. Matching from a high-water mark means each
+        step waits for its own evidence.
+        """
+        rx = re.compile(pattern)
+        deadline = time.time() + timeout
+        while True:
+            m = rx.search(self.text, self.mark)
+            if m:
+                self.mark = m.end()
+                return True
+            if time.time() >= deadline:
+                return False
+            self._pump(0.2)
+
+    def send(self, data):
+        os.write(self.fd, data)
+
+    def finish(self, settle=2.0):
+        deadline = time.time() + settle
+        while time.time() < deadline:
+            self._pump(0.1)
+        try:
+            os.kill(self.pid, 9)
+        except OSError:
+            pass
+        try:
+            os.waitpid(self.pid, 0)
+        except OSError:
+            pass
+        return self.seen
+
+
+def prompt_paste(name, fields, script, plain=True, wait=2.0, ready=None):
+    """Drive `vlt _prompt` and return everything it printed.
+
+    `script` is a list of (pattern-to-wait-for, bytes-to-send). A pattern of
+    None sends immediately — used only for keystrokes that follow one the
+    child has already acknowledged.
+    """
     import json
     payload = os.path.join(TH.VLT_HOME, "spec-%s.json" % name.replace("/", "-"))
     with open(payload, "w") as fh:
@@ -101,38 +183,26 @@ def prompt_paste(name, fields, typed, plain=True, wait=2.5):
         env["VLT_PLAIN_PROMPT"] = "1"
     else:
         env.pop("VLT_PLAIN_PROMPT", None)
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.execve(sys.executable, [sys.executable, TH.VLT, "_prompt", payload],
-                  env)
-    out = b""
-    try:
-        time.sleep(1.0)
-        for chunk, pause in typed:
-            os.write(fd, chunk)
-            time.sleep(pause)
-        deadline = time.time() + wait
-        os.set_blocking(fd, False)
-        while time.time() < deadline:
-            try:
-                out += os.read(fd, 65536)
-            except (OSError, BlockingIOError):
-                pass
-            time.sleep(0.05)
-    finally:
-        try:
-            os.kill(pid, 9)
-        except OSError:
-            pass
-        try:
-            os.waitpid(pid, 0)
-        except OSError:
-            pass
-    return out.decode("utf-8", "replace")
+
+    child = Pty([sys.executable, TH.VLT, "_prompt", payload], env)
+    # Nothing is typed until the child says it is listening. This is the whole
+    # difference between a suite that passes everywhere and one that passes
+    # where it was written.
+    if ready and not child.expect(ready):
+        child.finish(0.5)
+        return child.seen
+    for pattern, chunk in script:
+        if pattern and not child.expect(pattern):
+            break
+        child.send(chunk)
+    return child.finish(wait)
 
 
 screen = prompt_paste("ssh/prompt", ["key"],
-                      [((KEYTEXT + "\n").encode(), 1.5), (b"\n\n", 1.0)])
+                      [(None, (KEYTEXT + "\n").encode()),
+                       (r"account\s+\(opt", b"\n"),
+                       (r"notes\s+\(opt", b"\n")],
+                      ready=r"key\s+\(hidden")
 rec = V.load("ssh/prompt") if V.exists("ssh/prompt") else {"fields": {},
                                                            "notes": "?"}
 check("the prompt keeps every line of a pasted key",
@@ -150,8 +220,10 @@ check("the pasted key was never echoed to the screen",
 # for an -----END----- that is never coming is a hang, not a fix.
 started = time.time()
 screen = prompt_paste("token/plain", ["token"],
-                      [(b"EXAMPLEtokenAAAABBBBCCCCDDDD\n", 0.6), (b"\n\n", 0.6)],
-                      wait=1.5)
+                      [(None, b"EXAMPLEtokenAAAABBBBCCCCDDDD\n"),
+                       (r"account\s+\(opt", b"\n"),
+                       (r"notes\s+\(opt", b"\n")],
+                      ready=r"token\s+\(hidden")
 took = time.time() - started
 rec = V.load("token/plain") if V.exists("token/plain") else {"fields": {}}
 check("a one-line value still commits on Enter, promptly (%.1fs)" % took,
@@ -234,13 +306,14 @@ check("drain_pending returns nothing when nobody pasted",
 # ------------------------------------------- 6. the form, driven through a pty
 screen = prompt_paste(
     "ssh/form", ["key"],
-    [(b"\x1b[B" * 3, 0.8),          # down to the `key` row
-     (b"\n", 0.6),                  # start editing it
-     ((KEYTEXT + "\n").encode(), 1.5),
-     (b"\x04", 0.5),                # ^D commits the field
-     (b"\x1b[B" * 2, 0.6),          # down to [Save]
-     (b"\n", 1.2)],
-    plain=False, wait=2.0)
+    [(None, b"\x1b[B" * 3),         # down to the `key` row
+     (None, b"\n"),                 # start editing it
+     (r"value for key", (KEYTEXT + "\n").encode()),
+     # No ^D here: an armoured value commits itself at its -----END----- line,
+     # so the next thing the child prints is the form redrawing its footer.
+     (r"row\s+ENTER", b"\x1b[B" * 2),   # the redrawn footer; down to [Save]
+     (None, b"\n")],
+    plain=False, wait=4.0, ready=r"ssh/form")
 rec = V.load("ssh/form") if V.exists("ssh/form") else None
 check("the form saves a pasted key whole",
       rec is not None and rec["fields"].get("key") == KEYTEXT + "\n",
@@ -256,7 +329,10 @@ check("the form never echoed the key body", BODY[0] not in screen)
 TWOLINE = "EXAMPLEfirstlineAAAA\nEXAMPLEsecondlineBBBB"
 
 screen = prompt_paste("test/wrapped", ["password"],
-                      [((TWOLINE + "\n").encode(), 1.5), (b"\n\n", 1.0)])
+                      [(None, (TWOLINE + "\n").encode()),
+                       (r"account\s+\(opt", b"\n"),
+                       (r"notes\s+\(opt", b"\n")],
+                      ready=r"password\s+\(hidden")
 rec = V.load("test/wrapped") if V.exists("test/wrapped") else {"fields": {}}
 check("an unarmoured multi-line paste is kept whole",
       rec["fields"].get("password") == TWOLINE,
@@ -270,13 +346,16 @@ check("its second line did not become `notes`",
 # paste arrives as bare keystrokes because a pty does not bracket anything.
 screen = prompt_paste(
     "test/formwrapped", ["token"],
-    [(b"\x1b[B" * 3, 0.8),
-     (b"\n", 0.6),
-     ((TWOLINE + "\n").encode(), 1.5),
-     (b"\x04", 0.5),
-     (b"\x1b[B" * 2, 0.6),
-     (b"\n", 1.2)],
-    plain=False, wait=2.0)
+    [(None, b"\x1b[B" * 3),
+     (None, b"\n"),
+     (r"value for token", (TWOLINE + "\n").encode()),
+     # NOT anchored on the "<N" prefix: curses repositions the cursor and
+     # rewrites only the part of the field that changed, so the summary never
+     # crosses the wire as one contiguous string.
+     (r"lines, [1-9]\d* chars", b"\x04"),
+     (r"row\s+ENTER", b"\x1b[B" * 2),
+     (None, b"\n")],
+    plain=False, wait=4.0, ready=r"test/formwrapped")
 rec = V.load("test/formwrapped") if V.exists("test/formwrapped") else None
 check("the form keeps a multi-line paste in a single-line field",
       rec is not None and rec["fields"].get("token") == TWOLINE,
@@ -293,33 +372,15 @@ def browse_paste(payload_bytes):
     env = dict(TH.HUMAN)
     env["TERM"] = "xterm-256color"
     env["LINES"], env["COLUMNS"] = "40", "100"
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.execve(sys.executable, [sys.executable, TH.VLT, "ui"], env)
-    out = b""
-    try:
-        time.sleep(1.5)
-        os.write(fd, payload_bytes)
-        time.sleep(2.0)
-        os.write(fd, b"q")
-        time.sleep(0.8)
-        os.set_blocking(fd, False)
-        for _ in range(20):
-            try:
-                out += os.read(fd, 65536)
-            except (OSError, BlockingIOError):
-                pass
-            time.sleep(0.05)
-    finally:
-        try:
-            os.kill(pid, 9)
-        except OSError:
-            pass
-        try:
-            os.waitpid(pid, 0)
-        except OSError:
-            pass
-    return out.decode("utf-8", "replace")
+    child = Pty([sys.executable, TH.VLT, "ui"], env)
+    if not child.expect(r"add a credential|ssh|vault"):
+        return child.finish(0.5)
+    child.send(payload_bytes)
+    # Wait for the browser to SAY it ignored the paste rather than assuming it
+    # had time to. If it never says so, the assertion below reports that.
+    child.expect(r"ignored here", timeout=15)
+    child.send(b"q")
+    return child.finish(1.5)
 
 
 before = sorted(V.index().keys()) if hasattr(V, "index") else None
