@@ -9,6 +9,7 @@ curses only: no third-party dependency, so the vault stays self-contained.
 """
 
 import curses
+import sys
 
 import vltlib as V
 
@@ -144,6 +145,81 @@ _ESC_SEQ = {
 }
 
 
+# A key code that cannot collide with a real one. The text that came with it
+# is held here rather than returned, so that callers comparing the result to
+# ints (`32 <= k < 127`) keep working unchanged.
+PASTE_KEY = 0x7E000
+_PASTE = []
+
+_PASTE_BEGIN = [91, 50, 48, 48, 126]                 # ESC [ 2 0 0 ~
+_PASTE_END = [27, 91, 50, 48, 49, 126]               # ESC [ 2 0 1 ~
+
+
+def set_bracketed_paste(on):
+    """Ask the terminal to mark pasted text, and put it back on the way out.
+
+    A terminal that does not understand the request ignores it, which leaves
+    the drain-on-Enter fallback in edit_line as the safety net.
+    """
+    try:
+        sys.stdout.write("\x1b[?2004h" if on else "\x1b[?2004l")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def take_paste():
+    """The text of the paste that PASTE_KEY was returned for."""
+    return _PASTE.pop() if _PASTE else ""
+
+
+def _collect_paste(win, limit=1 << 18):
+    """Everything up to the ESC[201~ that closes a bracketed paste."""
+    out = []
+    win.nodelay(False)
+    win.timeout(400)               # a paste arrives in a burst, not by hand
+    try:
+        while len(out) < limit:
+            c = win.getch()
+            if c == -1:
+                break              # the terminal stopped mid-paste
+            out.append(c)
+            if out[-6:] == _PASTE_END:
+                del out[-6:]
+                break
+    finally:
+        win.timeout(-1)
+    raw = bytes(c & 0xFF for c in out if 0 <= c < 256)
+    text = raw.decode("utf-8", "replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def drain_pending(win, limit=1 << 18):
+    """Whatever is ALREADY queued, as text. Empty if the person is typing.
+
+    The fallback for terminals without bracketed paste. Human keystrokes
+    arrive milliseconds apart, so a non-blocking read after Enter returns
+    nothing; the tail of a paste is sitting in the buffer and returns at once.
+    """
+    out = []
+    win.nodelay(True)
+    try:
+        while len(out) < limit:
+            c = win.getch()
+            if c == -1:
+                break
+            out.append(c)
+    finally:
+        win.nodelay(False)
+    if out[:5] == _PASTE_BEGIN:                 # a paste the parser missed
+        del out[:5]
+    if out[-6:] == _PASTE_END:
+        del out[-6:]
+    raw = bytes(c & 0xFF for c in out if 0 <= c < 256)
+    return raw.decode("utf-8", "replace").replace("\r\n", "\n").replace(
+        "\r", "\n")
+
+
 def read_key(win):
     """getch(), with escape sequences resolved by hand as a fallback."""
     k = win.getch()
@@ -157,6 +233,12 @@ def read_key(win):
         b = win.getch()
         if b == -1:
             return 27
+        if a == 91 and b == 50:            # ESC [ 2 ... — paste, or Insert
+            rest = [win.getch(), win.getch(), win.getch()]
+            if [a, b] + rest == [91, 50] + _PASTE_BEGIN[2:]:
+                _PASTE.append(_collect_paste(win))
+                return PASTE_KEY
+            return -1
         if (a, b) in _ESC_SEQ:
             return _ESC_SEQ[(a, b)]
         if a == 91 and 48 <= b <= 57:      # ESC [ n ~
@@ -169,28 +251,98 @@ def read_key(win):
         win.nodelay(False)
 
 
-def edit_line(win, y, x, width, initial="", masked=False):
-    """A minimal single-line editor. Returns the new text, or None on ESC."""
+def _summarise(buf, masked):
+    """How a value that spans lines is shown in a one-line field."""
+    text = "".join(buf)
+    n = text.count("\n") + 1
+    return "<%d lines, %d chars%s>" % (n, len(text), ", hidden" if masked else "")
+
+
+def edit_line(win, y, x, width, initial="", masked=False, multiline=False,
+              hint_y=None):
+    """A field editor. Returns the new text, or None on ESC.
+
+    Single-line unless told otherwise, but it will not LOSE a multi-line value:
+    a paste that spans lines promotes the field, and an armoured value ends
+    itself at its -----END----- line. Ctrl-D commits from any mode.
+    """
     buf = list(initial)
     pos = len(buf)
+    multi = multiline or "\n" in initial
     curses.curs_set(1)
     win.keypad(True)
+
+    def _done():
+        # The newline a paste ends with is punctuation, not part of the value:
+        # a password committed with a trailing "\n" simply fails to
+        # authenticate. An armoured value gets exactly one back when it is
+        # saved — see vltlib.normalise_multiline.
+        return "".join(buf).rstrip("\n")
+
+    def _armour_complete():
+        """An armoured value that has reached its END line is finished."""
+        text = _done()
+        if not V.is_armoured(text):
+            return False
+        lines = [ln for ln in text.split("\n") if ln.strip()]
+        return bool(lines) and bool(V.PEM_END_RE.match(lines[-1]))
+
     try:
         while True:
-            shown = ("•" * len(buf)) if masked else "".join(buf)
+            if multi:
+                shown = _summarise(buf, masked)
+            else:
+                shown = ("•" * len(buf)) if masked else _done()
             if len(shown) > width - 1:
                 shown = shown[-(width - 1):]
             _put(win, y, x, shown.ljust(width - 1), _cp(C_SEL), width - 1)
+            if hint_y is not None:
+                h, w = win.getmaxyx()
+                tip = ("Enter = new line   ^D = done   ESC = cancel"
+                       if multi else
+                       "Enter = done   ^D = done   ESC = cancel")
+                _put(win, hint_y, 1, tip.ljust(w - 2), _cp(C_DIM), w - 2)
             try:
                 win.move(y, x + min(pos, width - 2))
             except curses.error:
                 pass
             win.refresh()
             k = read_key(win)
+            if k == PASTE_KEY:
+                text = take_paste()
+                if "\n" in text:
+                    multi = True
+                for ch in text:
+                    buf.insert(pos, ch)
+                    pos += 1
+                if _armour_complete():
+                    return _done()
+                continue
             if k in (27,):                       # ESC
                 return None
+            if k == 4:                           # ^D commits, in any mode
+                return _done()
             if k in (10, 13, curses.KEY_ENTER):
-                return "".join(buf)
+                if multi:
+                    buf.insert(pos, "\n")
+                    pos += 1
+                    if _armour_complete():
+                        return _done()
+                    continue
+                # Single-line, Enter pressed. If the terminal handed us more
+                # input in the same burst this was a paste it did not bracket:
+                # folding it into the value is the whole point — otherwise it
+                # escapes into the form's key handler and runs as commands.
+                pending = drain_pending(win)
+                if pending:
+                    multi = True
+                    for ch in "\n" + pending:
+                        buf.insert(pos, ch)
+                        pos += 1
+                    if _armour_complete():
+                        return _done()
+                    continue
+                return _done()
             if k in (curses.KEY_BACKSPACE, 127, 8):
                 if pos:
                     del buf[pos - 1]
@@ -391,6 +543,13 @@ class Form:
             self.draw()
             k = read_key(self.s)
             n = self._n_rows()
+            if k == PASTE_KEY:
+                # Not a keystroke. Executing the body of a pasted key as
+                # commands is exactly the bug this exists to stop.
+                text = take_paste()
+                self.msg = ("pasted %d chars — press Enter on a field first, "
+                            "then paste into it" % len(text))
+                continue
             if k == 27:
                 return None
             if k in (curses.KEY_UP,) and self.cur > 0:
@@ -458,10 +617,14 @@ class Form:
             r = self.rows[i - 3]
             y = getattr(self, "_fields_y", 8) + (i - 3)
             _put(self.s, h - 2, 0, " " * (w - 1))
+            multi = r.name in V.MULTILINE_FIELDS
             _put(self.s, h - 2, 1,
-                 "value for %s (typing is %s)" % (
-                     r.name, "hidden" if r.hidden else "visible"), _cp(C_HEAD))
-            v = edit_line(self.s, y, 19, 26, "", masked=r.hidden)
+                 "value for %s (typing is %s)%s" % (
+                     r.name, "hidden" if r.hidden else "visible",
+                     " — multi-line: ^D when done" if multi else ""),
+                 _cp(C_HEAD))
+            v = edit_line(self.s, y, 19, 26, "", masked=r.hidden,
+                          multiline=multi, hint_y=h - 1)
             if v is not None and v != "":
                 r.value = v
                 r.existing = False
@@ -775,6 +938,13 @@ class App:
             self.draw()
             k = read_key(self.s)
             self.msg = ""
+            if k == PASTE_KEY:
+                # `d` is delete and `v` is reveal. A base64 key body contains
+                # both, so a paste landing here must never be read as keys.
+                text = take_paste()
+                self.msg = ("pasted %d chars — ignored here; use `a` or `e` "
+                            "and paste into a field" % len(text))
+                continue
             # ESC is NOT a quit key: an unresolved arrow sequence arrives as
             # ESC, and quitting on it makes the browser unusable.
             if k == ord("q"):
@@ -841,8 +1011,24 @@ class App:
 
 # ------------------------------------------------------------------- entries
 
+def _with_paste(fn):
+    """Run a curses screen with bracketed paste on, and off again after.
+
+    Leaving the mode set would make every later paste in that terminal arrive
+    wrapped in ESC[200~ markers the shell would print literally.
+    """
+    def wrapped(s):
+        set_bracketed_paste(True)
+        try:
+            return fn(s)
+        finally:
+            set_bracketed_paste(False)
+    return wrapped
+
+
 def browse():
-    return curses.wrapper(lambda s: (_init_colors(), App(s).run())[1])
+    return curses.wrapper(
+        _with_paste(lambda s: (_init_colors(), App(s).run())[1]))
 
 
 def request_form(spec):
@@ -857,4 +1043,4 @@ def request_form(spec):
                     rows=rows, reason=spec.get("reason", ""),
                     title="credential requested by an agent")
         return form.run()
-    return curses.wrapper(_run)
+    return curses.wrapper(_with_paste(_run))

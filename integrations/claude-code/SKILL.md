@@ -127,6 +127,26 @@ there; the values are encrypted straight into the vault. You get back only succe
 failure, then a `vlt peek`. **Never** ask the user for the value in chat as a fallback —
 if the window cannot open, tell them to run `VLT_HUMAN=1 vlt add <name>` themselves.
 
+### Keys and certificates span lines
+
+Nothing special is needed to ask for one:
+
+```bash
+vlt request ssh/beta --type ssh --fields host,port,username,key \
+    --reason "deploy needs the server key"
+```
+
+The person pastes it whole into the window that opens and presses `^D`; the
+value is stored with the terminating newline OpenSSH requires. Use it the same
+way as any other field:
+
+```bash
+vlt file ssh/beta key --out /tmp/deploy.key --mode 0600
+```
+
+Never ask for a key in chat, never read one from `~/.ssh`, and never
+reconstruct one line by line — `vlt request` is the whole answer.
+
 ## Naming and structure
 
 Every record — whatever the credential — has the same shape:

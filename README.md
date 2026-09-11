@@ -1,6 +1,6 @@
 <h1 align="center">credfence</h1>
 <p align="center"><i>Let coding agents use your credentials without ever seeing them</i></p>
-<p align="center"><a href="https://github.com/mhmmdbdrhmd/credfence/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/credfence/actions/workflows/tests.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-6E7681?style=flat-square"> <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white"> <img alt="crypto" src="https://img.shields.io/badge/AES--256--GCM-per%20record-E7352C?style=flat-square"> <img alt="tests" src="https://img.shields.io/badge/tests-350%20assertions-58A6FF?style=flat-square"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/credfence/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/credfence/actions/workflows/tests.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-6E7681?style=flat-square"> <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white"> <img alt="crypto" src="https://img.shields.io/badge/AES--256--GCM-per%20record-E7352C?style=flat-square"> <img alt="tests" src="https://img.shields.io/badge/tests-392%20assertions-58A6FF?style=flat-square"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"></p>
 
 > An agent can find out that a GitHub token exists, confirm it starts `ghp_` and
 > is 40 characters, and run `gh` with it in the environment — **without the value
@@ -263,6 +263,40 @@ anything that consumes them is written once:
   shows one machine and `vlt list panel` shows every panel.
 - **`env_map`** is what lets `vlt exec` work identically for every record.
 
+### Credentials that span lines
+
+An SSH private key, a PEM certificate and a service-account blob are not one
+line of text, and `key`, `cert`, `certificate`, `private_key`, `ca`, `ca_cert`,
+`pubkey` and `public_key` are treated as multi-line fields everywhere.
+
+| where | how it ends |
+|---|---|
+| the entry form (`vlt add`, `vlt ui`, an agent's `vlt request`) | paste it; **`^D`** commits. An armoured value commits itself at its `-----END …-----` line. |
+| the plain prompt (`VLT_PLAIN_PROMPT=1`) | paste it, then **`^D`** or a line holding a single `.` |
+| non-interactive | `vlt set ssh/beta key - < ~/.ssh/id_ed25519` |
+
+Two details that matter more than they look:
+
+- **A paste is never read as keystrokes.** The UI asks the terminal for
+  bracketed paste, so pasted text arrives as one event and goes into the field
+  being edited. On a terminal too old for that, anything still queued when you
+  press Enter is folded into the value instead. Both matter because in the
+  record browser `d` is delete, `v` is reveal and `q` is quit — and a base64
+  key body contains all three.
+- **Armoured values are terminated on the way in.** OpenSSH rejects a key whose
+  final `-----END …-----` has no newline after it, and reports it as *invalid
+  format* rather than as one missing byte. `vlt file` writes that newline
+  whether or not `--newline` was passed, and will not add one to a password.
+
+> **None of this worked until `multiline_test.py` existed.** The prompt used
+> `getpass()`, which
+> stops at the first newline *and* restores the terminal with `TCSAFLUSH` —
+> discarding the rest of the paste, so a key became its own header with nothing
+> on screen to say anything had been lost. The unmasked fields used `input()`,
+> which does not flush, so the tail of a key became the answers to the next
+> prompts — and `notes` is printed in full by `vlt peek`. The form was worse
+> than either: it handed the remainder of the paste to its own key handler.
+
 ---
 
 ## 5. Masking is fail-closed
@@ -458,13 +492,13 @@ python3 tests/run_all.py --fast     # skip the pty-driven UI suites
 python3 tests/run_all.py --count    # assertions per suite
 ```
 
-**350 assertions across 14 suites**, all passing, every one of them against a
+**392 assertions across 16 suites**, all passing, every one of them against a
 throwaway vault in a temp directory — never your real one, and never your
 keyring. That isolation is not tidiness: an earlier version ran against the
 developer's live vault, and a test that unmasked a field printed a production
 credential into the log.
 
-A fifteenth suite, `keyring_test`, runs only where a real keyring is present and
+A seventeenth suite, `keyring_test`, runs only where a real keyring is present and
 `VLT_KEYRING_TEST=1` is set, because it writes to the machine's own keyring. CI
 sets it; your laptop does not, and `run_all.py` reports it as *not run* rather
 than as a pass.
@@ -481,6 +515,13 @@ The four worth knowing about:
 - **`bypass_test.py`** — `VLT_HUMAN=1` inside a script is refused.
 - **`scan_test.py`** — the inventory report finds credential files, and prints
   field *names* while never printing a field *value*.
+- **`multiline_test.py`** — a credential that spans lines (an SSH key, a
+  certificate) survives every entry path intact, and a paste is never executed
+  as keystrokes.
+- **`sshkey_test.py`** — generates a real key with `ssh-keygen`, puts it
+  through the vault, and asks **`ssh-keygen -y`** to accept what came back. It
+  also asserts that OpenSSH *rejects* the same key with its trailing newline
+  removed, so the byte is shown to be load-bearing rather than asserted to be.
 
 ---
 
@@ -492,8 +533,8 @@ The four worth knowing about:
 
 Being straight about what has been checked and what has not.
 
-**Verified — the suites, on this machine.** `python3 tests/run_all.py` runs 14
-suites and 350 assertions, and all pass; `--count`
+**Verified — the suites, on this machine.** `python3 tests/run_all.py` runs 16
+suites and 392 assertions, and all pass; `--count`
 reproduces that number per suite. The repository also passes from a **bare
 clone**, and `install.sh` succeeds from that clone into a sandbox prefix.
 

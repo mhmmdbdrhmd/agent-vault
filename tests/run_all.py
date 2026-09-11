@@ -26,7 +26,10 @@ SUITES = [
     ("form_test",    False, 30),   # type defaults, Save/Cancel
     ("layout_test",  False, 30),   # form geometry
     ("ui_test",      True, 180),   # the UI, driven through a pty
+    ("multiline_test", True, 300),  # keys and certs span lines; pastes
+                                   # must not become keystrokes
     ("scan_test",    False, 90),   # the inventory report, and its silence
+    ("sshkey_test",  False, 90),   # a real OpenSSH key, judged by OpenSSH
     ("keyring_test", False, 60),   # real keychain / Secret Service round trip
 ]
 

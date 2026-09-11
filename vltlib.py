@@ -76,6 +76,46 @@ TYPES = [
     "database", "cert", "vpn", "smtp", "service",
 ]
 
+# --------------------------------------------------------- multi-line values
+# Not every credential is a line of text. An OpenSSH private key, a PEM
+# certificate and a service-account blob all contain newlines, and a reader
+# that stops at the first one stores an armour header and calls it a key.
+# These fields are offered a multi-line editor by default; any other field is
+# promoted to one the moment its value turns out to span lines.
+MULTILINE_FIELDS = {"key", "cert", "certificate", "private_key",
+                    "ca", "ca_cert", "pubkey", "public_key"}
+
+# `-----BEGIN OPENSSH PRIVATE KEY-----`, `-----BEGIN CERTIFICATE-----`, and so
+# on. The armour is what makes auto-detection possible: a value that opens with
+# one of these is known to continue until the matching END.
+PEM_BEGIN_RE = re.compile(r"^-{5}BEGIN [A-Z0-9][A-Z0-9 ]*-{5}\s*$")
+PEM_END_RE = re.compile(r"^-{5}END [A-Z0-9][A-Z0-9 ]*-{5}\s*$")
+
+
+def is_armoured(value):
+    """Does this value open with a PEM/OpenSSH armour line?"""
+    if not value:
+        return False
+    first = value.replace("\r\n", "\n").split("\n", 1)[0]
+    return bool(PEM_BEGIN_RE.match(first))
+
+
+def normalise_multiline(value):
+    """CRLF to LF, and a terminating newline on anything armoured.
+
+    OpenSSH and every PEM parser require the final `-----END ...-----` to be
+    followed by a newline. A key stored without one is rejected as "invalid
+    format", which reads like the wrong key rather than a missing byte — so the
+    byte is added here, once, rather than at each of the places a key is
+    written out. Values that are not armoured are returned untouched: a
+    password may legitimately contain anything at all.
+    """
+    if not isinstance(value, str) or not is_armoured(value):
+        return value
+    v = value.replace("\r\n", "\n").replace("\r", "\n")
+    return v if v.endswith("\n") else v + "\n"
+
+
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*){0,3}$")
 
 
@@ -119,6 +159,12 @@ def normalize(rec):
         out["type"] = "service"
     if not out["provider"]:
         out["provider"] = out["name"].split("/")[0]
+    # An armoured value gets its line endings and its terminating newline here,
+    # whichever path it arrived by. See normalise_multiline.
+    for f, v in list(out["fields"].items()):
+        out["fields"][f] = normalise_multiline(v)
+    for f, v in list(out["extra"].items()):
+        out["extra"][f] = normalise_multiline(v)
     return out
 
 
