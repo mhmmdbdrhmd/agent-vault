@@ -1,6 +1,6 @@
 <h1 align="center">credfence</h1>
 <p align="center"><i>Let coding agents use your credentials without ever seeing them</i></p>
-<p align="center"><a href="https://github.com/mhmmdbdrhmd/credfence/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/credfence/actions/workflows/tests.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-6E7681?style=flat-square"> <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white"> <img alt="crypto" src="https://img.shields.io/badge/AES--256--GCM-per%20record-E7352C?style=flat-square"> <img alt="tests" src="https://img.shields.io/badge/tests-392%20assertions-58A6FF?style=flat-square"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/credfence/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/credfence/actions/workflows/tests.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-6E7681?style=flat-square"> <img alt="python" src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white"> <img alt="crypto" src="https://img.shields.io/badge/AES--256--GCM-per%20record-E7352C?style=flat-square"> <img alt="tests" src="https://img.shields.io/badge/tests-423%20assertions-58A6FF?style=flat-square"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"></p>
 
 > An agent can find out that a GitHub token exists, confirm it starts `ghp_` and
 > is 40 characters, and run `gh` with it in the environment — **without the value
@@ -263,6 +263,28 @@ anything that consumes them is written once:
   shows one machine and `vlt list panel` shows every panel.
 - **`env_map`** is what lets `vlt exec` work identically for every record.
 
+### Notes, and anything else displayed in full
+
+`notes` is the one field printed whole — by `vlt peek`, by the browser's detail
+pane, by the form. It may span lines: in the form, **Enter** starts a new line
+and **`^D`** finishes. `vlt peek` indents the continuations under the value
+column, so a note can never be mistaken for one of peek's own `key : value`
+lines however many lines it runs to; the browser draws up to four lines inside
+the pane and says how many it did not show.
+
+Values are stripped of control characters before anything draws them —
+including `ESC`, so a record cannot repaint, reposition or recolour the
+terminal of whoever displays it. That is enforced at `vltui._put`, the single
+function everything on screen goes through, rather than at the call sites that
+happened to be found.
+
+> **Also broken before `notes_test.py` existed.** A three-line note wrote lines
+> two and three at column zero — on top of the tree pane, destroying the
+> divider and cutting the last line mid-word. And in `vlt peek` the
+> continuations came out flush left with no key in front of them, so a note
+> reading `hidden   : (nothing)` was indistinguishable from peek's real
+> `hidden` line, in the output an agent is told to trust.
+
 ### Credentials that span lines
 
 An SSH private key, a PEM certificate and a service-account blob are not one
@@ -492,13 +514,13 @@ python3 tests/run_all.py --fast     # skip the pty-driven UI suites
 python3 tests/run_all.py --count    # assertions per suite
 ```
 
-**392 assertions across 16 suites**, all passing, every one of them against a
+**423 assertions across 17 suites**, all passing, every one of them against a
 throwaway vault in a temp directory — never your real one, and never your
 keyring. That isolation is not tidiness: an earlier version ran against the
 developer's live vault, and a test that unmasked a field printed a production
 credential into the log.
 
-A seventeenth suite, `keyring_test`, runs only where a real keyring is present and
+An eighteenth suite, `keyring_test`, runs only where a real keyring is present and
 `VLT_KEYRING_TEST=1` is set, because it writes to the machine's own keyring. CI
 sets it; your laptop does not, and `run_all.py` reports it as *not run* rather
 than as a pass.
@@ -522,6 +544,9 @@ The four worth knowing about:
   through the vault, and asks **`ssh-keygen -y`** to accept what came back. It
   also asserts that OpenSSH *rejects* the same key with its trailing newline
   removed, so the byte is shown to be load-bearing rather than asserted to be.
+- **`notes_test.py`** — renders the browser through `pyte` and asserts the pane
+  divider is in the same column on every row. A note that spans lines used to
+  write its second line at column zero, over the tree.
 
 ---
 
@@ -533,8 +558,8 @@ The four worth knowing about:
 
 Being straight about what has been checked and what has not.
 
-**Verified — the suites, on this machine.** `python3 tests/run_all.py` runs 16
-suites and 392 assertions, and all pass; `--count`
+**Verified — the suites, on this machine.** `python3 tests/run_all.py` runs 17
+suites and 423 assertions, and all pass; `--count`
 reproduces that number per suite. The repository also passes from a **bare
 clone**, and `install.sh` succeeds from that clone into a sandbox prefix.
 

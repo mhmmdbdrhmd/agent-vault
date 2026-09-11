@@ -718,13 +718,39 @@ def hidden_fields(rec):
     return (populated - DEFAULT_PUBLIC) | (DEFAULT_HIDDEN & populated)
 
 
+# Everything that is not printable on one line. LF is deliberately absent: it
+# is the one control character with a meaning worth keeping, and it is turned
+# into a visible marker rather than dropped. ESC (\x1b) IS in here, so a value
+# cannot carry an escape sequence into the terminal of whoever displays it.
+CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def display_lines(value):
+    """A value as the lines it actually occupies, each safe to print."""
+    if value in (None, ""):
+        return []
+    s = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return [CTRL_RE.sub("", ln.replace("\t", "    ")) for ln in s.split("\n")]
+
+
+def one_line(value, newline=" / "):
+    """Collapse a value onto a single line, visibly rather than silently.
+
+    Used wherever a value is written at a fixed position — a table cell, a
+    form row, a pane. The separator is shown so that a value which spans lines
+    does not read as though it did not.
+    """
+    return newline.join(display_lines(value))
+
+
 def preview(field, value, chars=4, hide=True):
     """Structure of one field: enough to verify format, never enough to use."""
     if value in (None, ""):
         return "(empty)"
     s = str(value)
     if not hide:
-        return "%s   [%d chars, %s]" % (s, len(s), classify(s))
+        # The length is the REAL length; only the rendering is flattened.
+        return "%s   [%d chars, %s]" % (one_line(s), len(s), classify(s))
     # hidden field: leading chars only, and never more than a quarter of it
     n = max(0, min(chars, len(s) // 4))
     head = s[:n]

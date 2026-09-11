@@ -451,11 +451,16 @@ def cmd_peek(args):
     V.audit("peek", args.name)
     print("name     : %s" % rec["name"])
     print("type     : %s" % rec["type"])
-    print("account  : %s" % rec.get("account", ""))
+    print("account  : %s" % V.one_line(rec.get("account", "")))
     print("tags     : %s" % ",".join(rec.get("tags", [])))
     print("env_map  : %s" % json.dumps(rec.get("env_map", {})))
     if rec.get("notes"):
-        print("notes    : %s" % rec["notes"])
+        # Continuations are INDENTED. No real key is, so a note can never
+        # forge one however many lines it runs to.
+        note = V.display_lines(rec["notes"])
+        print("notes    : %s" % note[0])
+        for cont in note[1:]:
+            print("           %s" % cont)
     hid = V.hidden_fields(rec)
     print("hidden   : %s" % (", ".join(sorted(hid)) or "(nothing)"))
     print("-" * 60)

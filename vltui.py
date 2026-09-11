@@ -63,8 +63,19 @@ def _cp(n):
     return curses.color_pair(n) if curses.has_colors() else 0
 
 
+# How many lines of a note the detail pane will show before it gives up.
+NOTE_ROWS = 4
+
+
 def _put(win, y, x, text, attr=0, maxw=None):
-    """Write text, clipped to the window. curses raises on overflow."""
+    """Write ONE line, clipped to the window.
+
+    Everything drawn goes through here, so this is where a value stops being
+    able to leave the position it was given. A newline in a note used to move
+    the cursor to column 0 of the next row and write over the tree; an escape
+    sequence in one could have repainted the whole screen. Both are neutralised
+    for every caller at once — see vltlib.one_line.
+    """
     h, w = win.getmaxyx()
     if y < 0 or y >= h or x >= w:
         return
@@ -72,8 +83,10 @@ def _put(win, y, x, text, attr=0, maxw=None):
     if limit <= 0:
         return
     try:
-        win.addnstr(y, x, str(text), limit, attr)
-    except curses.error:
+        win.addnstr(y, x, V.one_line(text), limit, attr)
+    except (curses.error, UnicodeError):
+        # curses raises at the edge of the window; UnicodeError if the locale
+        # cannot encode what the record holds. Neither is worth a traceback.
         pass
 
 
@@ -638,8 +651,14 @@ class Form:
                 r.value = v
                 r.existing = False
         elif i == self._i_notes():
+            # A note is prose, and prose has paragraphs. Enter breaks the line
+            # and ^D commits, which the hint line says out loud.
+            _put(self.s, h - 2, 0, " " * (w - 1))
+            _put(self.s, h - 2, 1,
+                 "notes — Enter starts a new line, ^D when done", _cp(C_HEAD))
             v = edit_line(self.s, getattr(self, "_notes_y", 10), 11,
-                          min(60, w - 12), self.notes)
+                          min(60, w - 12), self.notes, multiline=True,
+                          hint_y=h - 1)
             if v is not None:
                 self.notes = v.strip()
 
@@ -802,8 +821,19 @@ class App:
             y += 1
 
         y += 1
-        if rec.get("notes"):
-            _put(self.s, y, x, "notes: " + rec["notes"][:w - x - 8], _cp(C_DIM))
+        note = V.display_lines(rec.get("notes"))
+        if note:
+            # Shown across rows, inside the pane. The old single _put wrote the
+            # note's own newlines to the terminal, which put line two at column
+            # zero — on top of the tree.
+            _put(self.s, y, x, "notes: " + note[0], _cp(C_DIM))
+            for cont in note[1:NOTE_ROWS]:
+                y += 1
+                _put(self.s, y, x + 7, cont, _cp(C_DIM))
+            if len(note) > NOTE_ROWS:
+                y += 1
+                _put(self.s, y, x + 7,
+                     "… %d more line(s)" % (len(note) - NOTE_ROWS), _cp(C_DIM))
             y += 2
         _put(self.s, y, x, "SPACE masks/unmasks the selected field",
              _cp(C_DIM))
